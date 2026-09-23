@@ -1,0 +1,2 @@
+lz4==4.4.5
+marionette_driver==3.7.1

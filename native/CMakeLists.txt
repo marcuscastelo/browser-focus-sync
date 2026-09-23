@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.22)
+project(browser_focus_sync_idle LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
+find_package(KF6IdleTime REQUIRED)
+add_executable(idle-events idle_events.cpp)
+target_link_libraries(idle-events PRIVATE Qt6::Core Qt6::Gui KF6::IdleTime)

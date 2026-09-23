@@ -1,0 +1,27 @@
+# Copy outside the checkout to ~/.config/browser-focus-sync/config.toml.
+# Edit only the section relevant to this machine. Do not commit real profiles.
+[paths]
+data_dir = "~/.local/share/browser-focus-sync"
+state_dir = "~/.local/state/browser-focus-sync"
+
+[linux]
+# Actual browser executable, not a shell wrapper. Example for Arch's AUR build:
+executable = "/opt/zen-twilight-bin/zen-bin"
+profile = "~/.zen/REPLACE-ME.Default (twilight)"
+
+[mac]
+executable = "/Applications/Twilight.app/Contents/MacOS/zen"
+application = "Twilight"
+profile = "~/Library/Application Support/zen/Profiles/REPLACE-ME.Default (twilight)"
+# An SSH alias with BatchMode key authentication; Tailscale is optional.
+linux_host = "linux-sync"
+# Executed by the remote user's shell. Adjust if Linux uses non-default paths.
+remote_ctl = "~/.local/share/browser-focus-sync/venv/bin/python ~/.local/share/browser-focus-sync/runtime/focusctl.py"
+# Opt-in: a missing in-process bridge may require one protected restart.
+# Leave false unless you accept browser restarts during handoff.
+allow_restart = false
+
+[sync]
+# Structural changes use Zen's native Spaces engine; opt-in because native
+# conflict resolution can remove records. Tab open/close handoff works without it.
+allow_native_structure_sync = false
