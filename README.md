@@ -85,7 +85,15 @@ venv, builds the Linux idle helper, and writes a user-service definition. It
 **does not start services, restart browsers, modify browser preferences or create
 baselines**. It refuses existing installation/service destinations. For an
 existing personal deployment, keep it running until you schedule a separate
-migration; this repository is not an in-place updater.
+migration; the `install` command is not an in-place updater.
+
+An existing deployment can instead run the pinned `runtime/` sources from its
+existing Python environment. Set `[paths] data_dir` and `state_dir` to its
+current state directories, and set `socket_path` to its existing coordinator
+socket. Preserve its baselines and browser profile. Stop both old agents before
+changing their service definitions; restart them with the new configuration and
+verify a test handoff in both directions. Never seed a fresh baseline during an
+in-place migration.
 
 An interrupted install may leave a partial destination. Inspect it and move it
 aside (rather than blindly deleting it) before retrying. Keep runtime data out

@@ -41,6 +41,10 @@ class SetupTests(unittest.TestCase):
         with patch.object(cfg,'SETTINGS',{'linux':{'profile':'relative/profile'}}):
             with self.assertRaises(ValueError):cfg.profile('linux')
 
+    def test_socket_path_can_reuse_an_existing_coordinator(self):
+        with patch.object(cfg,'SETTINGS',{'paths':{'socket_path':'/run/user/1000/twilight-focus-sync.sock'}}):
+            self.assertEqual(cfg.path('paths','socket_path'),Path('/run/user/1000/twilight-focus-sync.sock'))
+
     def test_inventory_reads_synthetic_session_without_urls(self):
         import lz4.block
         with tempfile.TemporaryDirectory() as directory:

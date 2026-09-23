@@ -41,7 +41,7 @@ def profile(platform: str) -> Path:
 CODE_DIR = Path(__file__).resolve().parent
 DATA_DIR = path("paths", "data_dir", "~/.local/share/browser-focus-sync")
 STATE_DIR = path("paths", "state_dir", "~/.local/state/browser-focus-sync")
-SOCKET = STATE_DIR / "coordinator.sock"
+SOCKET = path("paths", "socket_path", str(STATE_DIR / "coordinator.sock"))
 PYTHON = Path(sys.executable)
 
 

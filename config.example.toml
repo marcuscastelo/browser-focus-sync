@@ -3,6 +3,9 @@
 [paths]
 data_dir = "~/.local/share/browser-focus-sync"
 state_dir = "~/.local/state/browser-focus-sync"
+# Optional when migrating an existing coordinator. Keep its socket path so
+# existing SSH clients continue to reach the same coordinator.
+# socket_path = "/run/user/1000/twilight-focus-sync.sock"
 
 [linux]
 # Actual browser executable, not a shell wrapper. Example for Arch's AUR build:
