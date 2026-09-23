@@ -44,7 +44,7 @@ BRIDGE_STATUS = BASE / "mac-control-bridge.json"
 TWILIGHT_EXECUTABLE = str(cfg.get("mac", "executable", "/Applications/Twilight.app/Contents/MacOS/zen"))
 
 
-def run(command: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run(command: list[str], timeout: int = 120, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         text=True,
@@ -52,6 +52,7 @@ def run(command: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
         stderr=subprocess.STDOUT,
         timeout=timeout,
         check=False,
+        input=input_data,
     )
 
 
@@ -532,7 +533,9 @@ def remote(
             separators=(",", ":"),
         ).encode()
         payload = "base64:" + base64.urlsafe_b64encode(message).decode()
-    result = run([*REMOTE_CTL, payload])
+    # A handoff can include hundreds of tab records. Passing it as an SSH
+    # argument can exceed the remote shell's argument limit.
+    result = run([*REMOTE_CTL, "-"], input_data=payload)
     if result.returncode != 0:
         print(f"remote event={event} exit={result.returncode} {result.stdout.strip()}", flush=True)
         return None

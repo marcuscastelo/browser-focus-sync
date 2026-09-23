@@ -4,10 +4,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
+from subprocess import CompletedProcess
 import coordinator as c
 import mac_agent as m
 
 class RecoveryTests(unittest.TestCase):
+    def test_remote_sends_large_handoff_over_stdin(self):
+        records=[{'url':'https://example.com/' + str(i)} for i in range(6000)]
+        with patch.object(m,'run',return_value=CompletedProcess([],0,'{"ok":true}')) as run:
+            self.assertEqual(m.remote('mac-idle',opened_tab_records=records),{'ok':True})
+            self.assertEqual(run.call_args.args[0][-1],'-')
+            self.assertGreater(len(run.call_args.kwargs['input_data']),100000)
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)/'baseline.json'

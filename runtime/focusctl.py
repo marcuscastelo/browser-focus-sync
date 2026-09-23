@@ -10,9 +10,14 @@ import bfs_config as cfg
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: focusctl.py status|mac-active|base64:PAYLOAD", file=sys.stderr)
+        print("usage: focusctl.py status|mac-active|base64:PAYLOAD|- (stdin)", file=sys.stderr)
         return 2
     payload = sys.argv[1]
+    if payload == "-":
+        payload = sys.stdin.read(16 * 1024 * 1024 + 1)
+        if len(payload) > 16 * 1024 * 1024:
+            print(json.dumps({"ok": False, "error": "request exceeds 16 MiB"}))
+            return 1
     try:
         if payload.startswith("base64:"):
             payload = base64.urlsafe_b64decode(payload[7:]).decode()
