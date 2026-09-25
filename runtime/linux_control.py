@@ -45,16 +45,21 @@ def profile_path() -> Path:
 
 
 def twilight_pid() -> int | None:
+    # A quick restart briefly leaves the exiting browser alive; prefer the newest.
+    newest: tuple[int, int] | None = None
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
         try:
             command = (proc / "cmdline").read_bytes().split(b"\0")
-            if command and command[0].decode() == EXECUTABLE and b"-contentproc" not in command:
-                return int(proc.name)
-        except (FileNotFoundError, PermissionError, UnicodeDecodeError):
+            if not command or command[0].decode() != EXECUTABLE or b"-contentproc" in command:
+                continue
+            started = int((proc / "stat").read_text().rsplit(")", 1)[1].split()[19])
+        except (FileNotFoundError, PermissionError, UnicodeDecodeError, IndexError, ValueError):
             continue
-    return None
+        if newest is None or started > newest[0]:
+            newest = (started, int(proc.name))
+    return newest[1] if newest else None
 
 
 def twilight_identity() -> str | None:
@@ -306,17 +311,14 @@ def acquire() -> bool:
 
 
 def bootstrap() -> bool:
-    if bridge_ready():
-        return release()
+    # The launcher starts Twilight with Marionette on. Wait for that listener
+    # before trusting a bridge status, which may belong to the exiting browser.
     for _ in range(120):
         if marionette_ready():
             break
-        if twilight_pid() is None:
-            time.sleep(0.25)
-            continue
         time.sleep(0.25)
     else:
-        return False
+        return bridge_ready()
     request_control(True)
     if not install_bridge():
         return False

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch, AsyncMock
 from subprocess import CompletedProcess
 import coordinator as c
+import linux_control as lc
 import mac_agent as m
 
 class RecoveryTests(unittest.TestCase):
@@ -48,5 +49,11 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(m.leave_mac_for_linux())
             sent=next(args for event,args in calls if event=='mac-idle')
             self.assertEqual(sent['closed_tab_ids'],set());native.assert_not_called()
+    def test_linux_bootstrap_ignores_bridge_of_exiting_browser(self):
+        with patch.object(lc,'marionette_ready',side_effect=[False,True]),patch.object(lc,'time'),patch.object(lc,'bridge_ready',return_value=True),patch.object(lc,'request_control'),patch.object(lc,'install_bridge',return_value=True) as install,patch.object(lc,'release',return_value=True):
+            self.assertTrue(lc.bootstrap());install.assert_called_once()
+    def test_linux_bootstrap_without_listener_reports_existing_bridge(self):
+        with patch.object(lc,'marionette_ready',return_value=False),patch.object(lc,'time'),patch.object(lc,'bridge_ready',return_value=False),patch.object(lc,'install_bridge') as install:
+            self.assertFalse(lc.bootstrap());install.assert_not_called()
 
 if __name__=='__main__': unittest.main()
