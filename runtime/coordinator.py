@@ -508,16 +508,23 @@ async def client_handler(
     await writer.wait_closed()
 
 
+async def start_server(coordinator: Coordinator, path: Path) -> asyncio.AbstractServer:
+    # The asyncio default (64 KiB) rejected ordinary multi-tab handoffs.
+    server = await asyncio.start_unix_server(
+        lambda reader, writer: client_handler(coordinator, reader, writer),
+        path=path,
+        limit=cfg.MAX_MESSAGE_BYTES + 1,
+    )
+    os.chmod(path, 0o600)
+    return server
+
+
 async def main() -> None:
     cfg.prepare_directories()
     coordinator = Coordinator()
     if SOCKET.exists():
         SOCKET.unlink()
-    server = await asyncio.start_unix_server(
-        lambda reader, writer: client_handler(coordinator, reader, writer),
-        path=SOCKET,
-    )
-    os.chmod(SOCKET, 0o600)
+    server = await start_server(coordinator, SOCKET)
     # Never acknowledge untransferred changes just because the service or
     # browser restarted. Existing baselines survive process identity changes.
     coordinator.save_state()

@@ -16,6 +16,22 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(m.remote('mac-idle',opened_tab_records=records),{'ok':True})
             self.assertEqual(run.call_args.args[0][-1],'-')
             self.assertGreater(len(run.call_args.kwargs['input_data']),100000)
+    def test_coordinator_accepts_handoff_larger_than_asyncio_default(self):
+        records=[{'id':str(i),'cleartext':{'kind':'tab','data':{'url':'https://example.com/'+'x'*200}}} for i in range(600)]
+        line=json.dumps({'event':'mac-idle','openedTabRecords':records,'handoffId':'h'})+'\n'
+        self.assertGreater(len(line),2**16)
+        async def exchange(path):
+            coordinator=c.Coordinator.__new__(c.Coordinator)
+            coordinator.handle_event=AsyncMock(return_value={'ok':True})
+            server=await c.start_server(coordinator,path)
+            async with server:
+                reader,writer=await asyncio.open_unix_connection(str(path))
+                writer.write(line.encode());await writer.drain()
+                response=json.loads(await reader.readline())
+                writer.close();await writer.wait_closed()
+            return response,coordinator.handle_event.call_args.args
+        response,args=asyncio.run(exchange(Path(self.tmp.name)/'s.sock'))
+        self.assertEqual(response,{'ok':True});self.assertEqual(len(args[2]),600)
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)/'baseline.json'

@@ -43,6 +43,8 @@ DATA_DIR = path("paths", "data_dir", "~/.local/share/browser-focus-sync")
 STATE_DIR = path("paths", "state_dir", "~/.local/state/browser-focus-sync")
 SOCKET = path("paths", "socket_path", str(STATE_DIR / "coordinator.sock"))
 PYTHON = Path(sys.executable)
+# One newline-delimited coordinator request or response; handoffs carry tab records.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 def prepare_directories() -> None:
