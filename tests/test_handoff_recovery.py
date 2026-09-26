@@ -32,6 +32,9 @@ class RecoveryTests(unittest.TestCase):
             return response,coordinator.handle_event.call_args.args
         response,args=asyncio.run(exchange(Path(self.tmp.name)/'s.sock'))
         self.assertEqual(response,{'ok':True});self.assertEqual(len(args[2]),600)
+    def test_mac_reports_unusable_marionette_listener(self):
+        with patch.object(m,'marionette_ready',return_value=True),patch.object(m,'request_control'),patch.object(m,'bridge_ready',return_value=False),patch.object(m,'install_bridge',return_value=False),patch('builtins.print') as log:
+            self.assertFalse(m.ensure_control());self.assertIn('could not be installed',log.call_args.args[0])
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)/'baseline.json'

@@ -347,6 +347,9 @@ def ensure_control() -> bool:
     if marionette_ready():
         request_control(True)
         if not bridge_ready() and not install_bridge():
+            # Seen after Twilight restarted itself with an inherited
+            # MOZ_MARIONETTE: the port listens but never completes a session.
+            print("Marionette is listening but the control bridge could not be installed", flush=True)
             return False
         return wait_for_control(True)
     if not twilight_running():
