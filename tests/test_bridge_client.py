@@ -63,6 +63,8 @@ class LeaseTests(unittest.TestCase):
         self.paths.request.write_text("off")
         self.current = patch.object(bc, "identity_is_current", return_value=True)
         self.current.start()
+        self.identity = patch.object(bc, "browser_identity", return_value="123:456")
+        self.identity.start()
         self.bridges = []
 
     def tearDown(self):
@@ -70,6 +72,7 @@ class LeaseTests(unittest.TestCase):
             bridge.stop.set()
             bridge.join(2)
         self.current.stop()
+        self.identity.stop()
         self.tmp.cleanup()
 
     def bridge(self, **options):

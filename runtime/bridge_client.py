@@ -141,7 +141,11 @@ def bridge_paths(directory: Path, prefix: Optional[str] = None) -> Paths:
 def _linux_identity(executable_path: str) -> Optional[str]:
     # A quick restart briefly leaves the exiting browser alive; prefer the newest.
     newest = None
-    for proc in Path("/proc").iterdir():
+    try:
+        processes = list(Path("/proc").iterdir())
+    except OSError:
+        return None
+    for proc in processes:
         if not proc.name.isdigit():
             continue
         try:
@@ -363,7 +367,13 @@ class Lease:
                 self.inherited = True
                 self.identity = browser_identity(self.executable, self.system)
                 return self
-            identity = current_bridge(self.paths, self.executable, self.system)
+            # The bridge rewrites its status file in place; retry a torn read.
+            identity = None
+            for _ in range(8):
+                identity = current_bridge(self.paths, self.executable, self.system)
+                if identity is not None:
+                    break
+                time.sleep(0.125)
             if identity is None:
                 raise BridgeError("bridge_unavailable",
                                   "Twilight control bridge is unavailable or stale; refusing to restart the browser")
