@@ -16,7 +16,9 @@ from pathlib import Path
 
 import bfs_config as cfg
 
+import bridge_client
 import lz4.block
+import structure
 from marionette_driver.errors import MarionetteException
 from marionette_driver.marionette import Marionette
 
@@ -24,8 +26,7 @@ from marionette_driver.marionette import Marionette
 BASE = cfg.DATA_DIR
 PYTHON = cfg.PYTHON
 SYNC = cfg.CODE_DIR / "sync_now.py"
-APPLY_TAB_DELETIONS = cfg.CODE_DIR / "apply_tab_deletions.py"
-APPLY_TAB_RECORDS = cfg.CODE_DIR / "apply_tab_records.py"
+STRUCTURE_RECORDS = cfg.CODE_DIR / "structure_records.py"
 EXPORT_TAB_RECORDS = cfg.CODE_DIR / "export_tab_records.py"
 REMOTE_CTL = [
     "ssh",
@@ -43,6 +44,9 @@ ACTIVE_BASELINE = BASE / "active-baseline.json"
 CONTROL_REQUEST = BASE / "mac-control-request"
 BRIDGE_STATUS = BASE / "mac-control-bridge.json"
 TWILIGHT_EXECUTABLE = str(cfg.get("mac", "executable", "/Applications/Twilight.app/Contents/MacOS/zen"))
+# One lease per process, held from the first need of control to the end of the
+# handoff, so the Twilight MCP and route applier wait instead of interleaving.
+LEASE = bridge_client.Lease(directory=BASE, executable_path=TWILIGHT_EXECUTABLE, prefix="mac", label="focus-sync mac_agent")
 
 
 def run(command: list[str], timeout: int = 120, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -213,31 +217,6 @@ def install_bridge() -> bool:
             pass
 
 
-def wait_for_control(enabled: bool, attempts: int = 80) -> bool:
-    for _ in range(attempts):
-        if marionette_ready() == enabled:
-            return True
-        time.sleep(0.25)
-    return False
-
-
-def wait_for_bridge_clean(attempts: int = 40) -> bool:
-    identity = twilight_identity()
-    for _ in range(attempts):
-        try:
-            status = json.loads(BRIDGE_STATUS.read_text())
-            if (
-                status.get("identity") == identity
-                and status.get("running") is False
-                and status.get("webdriverActive") is False
-            ):
-                return True
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
-        time.sleep(0.1)
-    return False
-
-
 def twilight_pid() -> str | None:
     result = run(["/bin/ps", "-axo", "pid=,command="], timeout=5)
     for line in result.stdout.splitlines():
@@ -269,6 +248,13 @@ def tab_ids(profile: Path) -> set[str]:
     payload = (profile / "zen-sessions.jsonlz4").read_bytes()
     data = json.loads(lz4.block.decompress(payload[8:]))
     return {tab["zenSyncId"] for tab in data.get("tabs", []) if tab.get("zenSyncId")}
+
+
+def fingerprint(profile: Path) -> str | None:
+    try:
+        return structure.stored_fingerprint(profile)
+    except (OSError, ValueError):
+        return None
 
 
 def structure_hash(profile: Path) -> str:
@@ -440,44 +426,47 @@ def restart_twilight_with_control() -> bool:
     return False
 
 
+def take_lease() -> bool:
+    try:
+        LEASE.acquire()
+        return True
+    except bridge_client.BridgeError as error:
+        print(f"Twilight control unavailable ({error.code}): {error}", flush=True)
+        return False
+
+
 def ensure_control() -> bool:
-    if marionette_ready():
+    if LEASE.held:
+        return True
+    if marionette_ready() and not bridge_ready():
         request_control(True)
-        if not bridge_ready() and not install_bridge():
+        if not install_bridge():
             # Seen after Twilight restarted itself with an inherited
             # MOZ_MARIONETTE: the port listens but never completes a session.
             print("Marionette is listening but the control bridge could not be installed", flush=True)
             return False
-        return wait_for_control(True)
     if not twilight_running():
         return False
+    if bridge_ready() or marionette_ready():
+        return take_lease()
     if RESTART_BLOCKED.exists():
-        return False
-    if bridge_ready():
-        request_control(True)
-        if wait_for_control(True):
-            print("Temporary Twilight control enabled in place", flush=True)
-            return True
         return False
     if not cfg.get("mac", "allow_restart", False):
         print("Control bridge missing; restart is disabled by configuration", flush=True)
         return False
-    return restart_twilight_with_control()
+    return restart_twilight_with_control() and take_lease()
 
 
 def release_control() -> bool:
-    if not marionette_ready():
-        return True
-    print("Stopping temporary Twilight control", flush=True)
-    if not bridge_ready() and not install_bridge():
-        print("Cannot install in-process Twilight control; leaving listener unchanged", flush=True)
-        return False
-    request_control(False)
-    if not wait_for_control(False) or not wait_for_bridge_clean():
-        print("Mac Marionette did not stop in place", flush=True)
-        return False
-    print("Mac Twilight control disabled in place", flush=True)
-    return True
+    """End this process's lease and leave Marionette off, whoever turned it on."""
+    if not LEASE.held:
+        if not marionette_ready():
+            return True
+        if not take_lease():
+            return False
+    clean = LEASE.release(force_off=True)
+    print("Mac Twilight control disabled in place" if clean else "Mac Marionette did not stop in place", flush=True)
+    return clean
 
 
 def save_active_baseline(
@@ -485,6 +474,8 @@ def save_active_baseline(
     live: bool,
     handoff_id: str | None = None,
     tab_ids_override: set[str] | None = None,
+    records: dict[str, list[str]] | None = None,
+    stored_fingerprint: str | None = None,
 ) -> bool:
     identity = twilight_identity()
     ids = tab_ids_override
@@ -492,11 +483,15 @@ def save_active_baseline(
         ids = live_tab_ids() if live else tab_ids(twilight_profile())
     if identity is None or ids is None:
         return False
+    if records is None:
+        records = active_baseline_records()
     temporary = ACTIVE_BASELINE.with_suffix(".tmp")
     temporary.write_text(json.dumps({
         "identity": identity,
         "tabIds": sorted(ids),
         "structureHash": structure_hash(twilight_profile()),
+        "records": records,
+        "fingerprint": stored_fingerprint,
         "handoffId": handoff_id,
     }))
     temporary.replace(ACTIVE_BASELINE)
@@ -510,6 +505,13 @@ def active_baseline_ids() -> set[str] | None:
             return None
         return set(baseline["tabIds"])
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def active_baseline_records() -> dict[str, list[str]] | None:
+    try:
+        return structure.valid_digests(json.loads(ACTIVE_BASELINE.read_text()).get("records"))
+    except (FileNotFoundError, AttributeError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -554,36 +556,68 @@ def sync_mac(reason: str) -> bool:
     return result.returncode == 0
 
 
-def apply_linux_tab_deletions(ids: list[str]) -> bool:
-    if not ids:
-        return True
-    if len(ids) > 5000 or not all(isinstance(item, str) for item in ids):
-        return False
-    result = run(
-        [
-            str(PYTHON),
-            str(APPLY_TAB_DELETIONS),
-            "--ids-json",
-            json.dumps(list(dict.fromkeys(ids)), separators=(",", ":")),
-        ]
-    )
-    print(f"apply-linux-tab-deletions exit={result.returncode} {output(result)}", flush=True)
-    return result.returncode == 0
-
-
-def apply_linux_tab_records(records: list[dict[str, object]]) -> bool:
-    if not records:
-        return True
-    incoming = BASE / "incoming-linux-tab-records.json"
+def apply_changes(
+    closed_tab_ids: list[str],
+    tab_records: list[dict[str, object]],
+    structure_records: list[dict[str, object]],
+    deleted_structure_ids: list[str],
+) -> dict[str, object] | None:
+    """Apply Linux's handoff in one batch; return the browser's report."""
+    if not (closed_tab_ids or tab_records or structure_records or deleted_structure_ids):
+        return {"ok": True, "records": None, "deleted": []}
+    incoming = BASE / "incoming-linux-changes.json"
     temporary = incoming.with_suffix(".tmp")
-    temporary.write_text(json.dumps(records, separators=(",", ":")))
+    temporary.write_text(json.dumps({
+        "tabRecords": tab_records,
+        "records": structure_records,
+        "deletedIds": deleted_structure_ids,
+        "closingTabIds": closed_tab_ids,
+    }, separators=(",", ":")))
     temporary.replace(incoming)
     try:
-        result = run([str(PYTHON), str(APPLY_TAB_RECORDS), "--records-file", str(incoming)])
+        result = run([str(PYTHON), str(STRUCTURE_RECORDS), "apply", "--payload-file", str(incoming)])
     finally:
         incoming.unlink(missing_ok=True)
-    print(f"apply-linux-tab-records exit={result.returncode} {output(result)}", flush=True)
-    return result.returncode == 0
+    report = parse(result)
+    print(f"apply-linux-changes exit={result.returncode} {structure.summary(report) if report else output(result)}", flush=True)
+    if result.returncode != 0 or not report or not report.get("ok"):
+        return None
+    return report
+
+
+def parse(result: subprocess.CompletedProcess[str]) -> dict[str, object] | None:
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def structure_changes(
+    baseline: dict[str, list[str]] | None,
+    *,
+    same_browser: bool,
+    skip_ids: set[str],
+) -> tuple[list[dict[str, object]], list[str], dict[str, list[str]]] | None:
+    """Changed structure records, structure deletions and the digests they came from."""
+    result = run([str(PYTHON), str(STRUCTURE_RECORDS), "state"])
+    state = parse(result) or {}
+    records = structure.valid_digests(state.get("records"))
+    if result.returncode != 0 or records is None:
+        print(f"mac structure state failed: exit={result.returncode} {output(result)}", flush=True)
+        return None
+    changed, deleted = structure.plan(
+        baseline, records, set(state.get("presentIds") or []), same_browser=same_browser, skip_ids=skip_ids,
+    )
+    exported: list[dict[str, object]] = []
+    if changed:
+        result = run([str(PYTHON), str(STRUCTURE_RECORDS), "export", "--ids-json", json.dumps(changed)])
+        payload = parse(result) or {}
+        if result.returncode != 0 or not isinstance(payload.get("records"), list):
+            print(f"export-mac-structure exit={result.returncode} {output(result)}", flush=True)
+            return None
+        exported = payload["records"]
+    return structure.outgoing(exported, baseline), deleted, records
 
 
 def export_tab_records(ids: set[str]) -> list[dict[str, object]] | None:
@@ -614,6 +648,8 @@ def remote(
     opened_tab_records: list[dict[str, object]] | None = None,
     native_sync_required: bool | None = None,
     handoff_id: str | None = None,
+    structure_records: list[dict[str, object]] | None = None,
+    deleted_structure_ids: list[str] | None = None,
 ) -> dict[str, object] | None:
     payload = event
     if (
@@ -627,6 +663,8 @@ def remote(
                 "event": event,
                 "closedTabIds": sorted(closed_tab_ids or set()),
                 "openedTabRecords": opened_tab_records or [],
+                "structureRecords": structure_records or [],
+                "deletedStructureIds": deleted_structure_ids or [],
                 "nativeSyncRequired": bool(native_sync_required),
                 "handoffId": handoff_id,
             },
@@ -645,6 +683,23 @@ def remote(
         return None
 
 
+def incoming(response: dict[str, object]) -> tuple[list[str], list, list, list[str], bool] | None:
+    closed = response.get("closedTabIds", [])
+    opened = response.get("openedTabRecords", [])
+    records = response.get("structureRecords", [])
+    deleted = response.get("deletedStructureIds", [])
+    native = response.get("nativeSyncRequired", False)
+    if (
+        not isinstance(closed, list) or not all(isinstance(item, str) for item in closed)
+        or not isinstance(opened, list) or not isinstance(records, list)
+        or not all(isinstance(item, dict) for item in records)
+        or not isinstance(deleted, list) or not all(isinstance(item, str) for item in deleted)
+        or not isinstance(native, bool)
+    ):
+        return None
+    return closed, opened, records, deleted, native
+
+
 def enter_mac() -> bool:
     response = remote("mac-active")
     if not response or not response.get("ok"):
@@ -654,24 +709,28 @@ def enter_mac() -> bool:
         # here silently acknowledged Mac edits before Linux received them.
         return active_baseline_ids() is not None
     prior_baseline = active_baseline_ids()
-    closed_tabs = response.get("closedTabIds", [])
-    opened_records = response.get("openedTabRecords", [])
-    native_sync_required = response.get("nativeSyncRequired", False)
+    prior_records = active_baseline_records()
     handoff_id = response.get("handoffId")
-    if (
-        not isinstance(opened_records, list)
-        or not isinstance(closed_tabs, list)
-        or not isinstance(native_sync_required, bool)
-        or not isinstance(handoff_id, str)
-    ):
+    changes = incoming(response)
+    if changes is None or not isinstance(handoff_id, str):
         return False
-    needs_control = bool(closed_tabs) or bool(opened_records) or native_sync_required
+    closed_tabs, opened_records, structure_records, deleted_structure, native_sync_required = changes
+    needs_control = bool(closed_tabs or opened_records or structure_records or deleted_structure or native_sync_required)
     opened_ids = record_ids(opened_records)
     if opened_ids is None:
         return False
-    mac_snapshot = tab_ids(twilight_profile())
+    profile = twilight_profile()
+    mac_snapshot = tab_ids(profile)
+    # Mac edits not yet sent keep the stored fingerprint dirty, so the return
+    # trip still reads and sends them.
+    try:
+        prior_fingerprint = json.loads(ACTIVE_BASELINE.read_text()).get("fingerprint")
+    except (FileNotFoundError, AttributeError, ValueError, json.JSONDecodeError):
+        prior_fingerprint = None
+    pending = prior_fingerprint is None or prior_fingerprint != fingerprint(profile)
     success = True
     clean = True
+    records = prior_records
     if needs_control:
         if not ensure_control():
             return False
@@ -680,11 +739,13 @@ def enter_mac() -> bool:
             if live_snapshot is None:
                 return False
             mac_snapshot = live_snapshot
-            success = (
-                (not native_sync_required or sync_mac("after-linux"))
-                and apply_linux_tab_records(opened_records)
-                and apply_linux_tab_deletions(closed_tabs)
-            )
+            report = None
+            success = (not native_sync_required or sync_mac("after-linux"))
+            if success:
+                report = apply_changes(closed_tabs, opened_records, structure_records, deleted_structure)
+                success = report is not None
+            if report is not None:
+                records = structure.received(prior_records, report, opened_records + structure_records, closed_tabs)
         finally:
             clean = release_control()
     # Keep local edits that predate the handoff pending for the return trip.
@@ -693,6 +754,8 @@ def enter_mac() -> bool:
         live=False,
         handoff_id=handoff_id,
         tab_ids_override=expected_ids,
+        records=records,
+        stored_fingerprint=None if pending else fingerprint(profile),
     ):
         return False
     confirmed = remote("mac-synced", handoff_id=handoff_id)
@@ -716,19 +779,24 @@ def leave_mac_for_linux() -> bool | None:
     handoff_id = baseline_data.get("handoffId")
     if not isinstance(handoff_id, str):
         return False
+    base_records = structure.valid_digests(baseline_data.get("records"))
     profile = twilight_profile()
     stored = tab_ids(profile)
     structure_changed = (
         cfg.get("sync", "allow_native_structure_sync", False) and same_browser and baseline_data.get("structureHash") is not None
         and baseline_data["structureHash"] != structure_hash(profile)
     )
-    local_changed = stored != baseline or structure_changed
+    structure_dirty = base_records is None or baseline_data.get("fingerprint") != fingerprint(profile)
+    local_changed = stored != baseline or structure_changed or structure_dirty
     controlled = False
     success = False
     acknowledged_ids = stored
+    acknowledged_records = base_records
     try:
         closed_tabs: set[str] = set()
         opened_records: list[dict[str, object]] = []
+        structure_records: list[dict[str, object]] = []
+        deleted_structure: list[str] = []
         if local_changed:
             if not ensure_control():
                 return False
@@ -738,16 +806,23 @@ def leave_mac_for_linux() -> bool | None:
                 return False
             acknowledged_ids = current
             closed_tabs = baseline - current if same_browser else set()
-            opened = export_tab_records(current - baseline)
+            opened_ids = current - baseline
+            opened = export_tab_records(opened_ids)
             if opened is None or (structure_changed and not sync_mac("before-linux")):
                 return False
             opened_records = opened
+            changes = structure_changes(base_records, same_browser=same_browser, skip_ids=opened_ids)
+            if changes is None:
+                return False
+            structure_records, deleted_structure, acknowledged_records = changes
         response = remote(
             "mac-idle",
             closed_tab_ids=closed_tabs,
             opened_tab_records=opened_records,
             native_sync_required=structure_changed,
             handoff_id=handoff_id,
+            structure_records=structure_records,
+            deleted_structure_ids=deleted_structure,
         )
         if (
             not response
@@ -757,30 +832,27 @@ def leave_mac_for_linux() -> bool | None:
             or response.get("owner") != "mac"
         ):
             return False
-        returned_closed = response.get("closedTabIds", [])
-        returned_opened = response.get("openedTabRecords", [])
-        returned_native = response.get("nativeSyncRequired", False)
-        if (
-            not isinstance(returned_closed, list)
-            or not isinstance(returned_opened, list)
-            or not isinstance(returned_native, bool)
-        ):
+        changes_back = incoming(response)
+        if changes_back is None:
             return False
+        returned_closed, returned_opened, returned_structure, returned_deleted, returned_native = changes_back
         returned_ids = record_ids(returned_opened)
         if returned_ids is None:
             return False
         acknowledged_ids = (acknowledged_ids - set(returned_closed)) | returned_ids
-        if returned_closed or returned_opened or returned_native:
+        if returned_closed or returned_opened or returned_structure or returned_deleted or returned_native:
             if not controlled:
                 if not ensure_control():
                     return False
                 controlled = True
             if returned_native and not sync_mac("after-linux"):
                 return False
-            if not apply_linux_tab_records(returned_opened):
+            report = apply_changes(returned_closed, returned_opened, returned_structure, returned_deleted)
+            if report is None:
                 return False
-            if not apply_linux_tab_deletions(returned_closed):
-                return False
+            acknowledged_records = structure.received(
+                acknowledged_records, report, returned_opened + returned_structure, returned_closed,
+            )
         confirmed = remote("linux-synced", handoff_id=handoff_id)
         success = bool(
             confirmed
@@ -791,7 +863,11 @@ def leave_mac_for_linux() -> bool | None:
     finally:
         clean = not controlled or release_control()
     return success and clean and save_active_baseline(
-        live=False, handoff_id=handoff_id, tab_ids_override=acknowledged_ids
+        live=False,
+        handoff_id=handoff_id,
+        tab_ids_override=acknowledged_ids,
+        records=acknowledged_records,
+        stored_fingerprint=fingerprint(profile),
     )
 
 

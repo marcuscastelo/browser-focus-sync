@@ -4,8 +4,9 @@ Move between computers without manually clicking **Sync now**.
 
 An experimental focus-handoff coordinator for **Zen Browser / Twilight on Linux
 KDE and macOS**, using SSH (optionally over Tailscale). Linux coordinates; the Mac
-agent observes local input activity. On a handoff, tab additions and closures are
-transferred in order, with temporary in-process Marionette control.
+agent observes local input activity. On a handoff, tab additions and closures and
+the sidebar structure (Spaces, folders, split views, order, pinning, a tab's place
+and URL) are transferred, with temporary in-process Marionette control.
 
 **This is an extracted working prototype, not a universal browser sync product.**
 Chrome, Brave, Opera, Safari and vanilla Firefox are not supported. The browser
@@ -19,9 +20,9 @@ installer/configuration is new: validate it with disposable profiles first.
 | --- | --- |
 | Open/close handoff between one Linux and one Mac | Arbitrary peers or concurrent multi-writer merging |
 | Preserve pending edits across focus changes | Initial automatic union of divergent profiles |
-| Resume baselines across browser process changes | Live mirroring of every navigation or scroll position |
+| Resume baselines across browser process changes | Live mirroring of navigation history or scroll position |
 | Turn Marionette off after operations | Guarantee cleanup if the process is killed mid-operation |
-| Optional native Spaces/folder sync | Password, cookie, extension-state or login migration |
+| Spaces, folders, split views, order and tab placement | Password, cookie, extension-state or login migration |
 
 "Focus" means recent **device input**, not the frontmost browser window. The
 current defaults are 30 seconds of Linux inactivity and 8 seconds on macOS.
@@ -220,6 +221,16 @@ not an automatic destructive command.
   restart stays a separate path in `mac_agent`. While held,
   `<platform>-control.holder.json` names the holder (`pid`, `label`, `since` in ms);
   `bridge_client.holder()` reads it for diagnostics.
+- Structure travels as Zen's own sidebar records (`ZenSpacesSyncModel`
+  projections, applied with `ZenSpacesSyncApplier`) compared against each side's
+  digests from the last handoff (`runtime/structure.py`,
+  `runtime/structure_records.py`); Mozilla Sync and its server state are not used.
+  After a browser restart only new records travel. Only Spaces, folders and split
+  views are deleted as structure, and a receiver keeps a Space or folder that
+  still holds tabs the handoff does not close. An update for something the
+  receiver no longer has is skipped, not recreated. On a simultaneous edit of the
+  same record the Mac's version wins. A changed URL only retargets an unloaded
+  tab; nothing is loaded and a loaded tab is never navigated.
 - Native Spaces sync is separate and opt-in; bulk deletion guards do not make it
   a conflict-free merge engine. Simultaneous editing and large handoff payloads
   still need hardening. Missing/corrupt baselines fail closed, not auto-reseeded.
