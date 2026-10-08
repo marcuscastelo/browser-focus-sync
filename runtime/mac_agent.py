@@ -46,7 +46,7 @@ BRIDGE_STATUS = BASE / "mac-control-bridge.json"
 TWILIGHT_EXECUTABLE = str(cfg.get("mac", "executable", "/Applications/Twilight.app/Contents/MacOS/zen"))
 # One lease per process, held from the first need of control to the end of the
 # handoff, so the Twilight MCP and route applier wait instead of interleaving.
-LEASE = bridge_client.Lease(directory=BASE, executable_path=TWILIGHT_EXECUTABLE, prefix="mac")
+LEASE = bridge_client.Lease(directory=BASE, executable_path=TWILIGHT_EXECUTABLE, prefix="mac", label="focus-sync mac_agent")
 
 
 def run(command: list[str], timeout: int = 120, input_data: str | None = None) -> subprocess.CompletedProcess[str]:

@@ -31,7 +31,7 @@ CONTROL_REQUEST = BASE / "linux-control-request"
 BRIDGE_STATUS = BASE / "linux-control-bridge.json"
 # One lease per process, held from the first need of control to the end of the
 # handoff, so the Twilight MCP and route applier wait instead of interleaving.
-LEASE = bridge_client.Lease(directory=BASE, executable_path=EXECUTABLE, prefix="linux")
+LEASE = bridge_client.Lease(directory=BASE, executable_path=EXECUTABLE, prefix="linux", label="focus-sync coordinator")
 
 
 def run(command: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
