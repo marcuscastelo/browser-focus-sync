@@ -355,6 +355,49 @@ def open_twilight(profile: Path, *, controlled: bool) -> bool:
     return False
 
 
+def selected_tab_id(profile: Path) -> str | None:
+    """The tab selected when Twilight quit, read from the session it wrote on exit."""
+    for name in ("sessionstore.jsonlz4", "sessionstore-backups/recovery.jsonlz4"):
+        try:
+            payload = (profile / name).read_bytes()
+            window = json.loads(lz4.block.decompress(payload[8:]))["windows"][0]
+            tab = window["tabs"][window["selected"] - 1]
+        except (OSError, ValueError, KeyError, IndexError, TypeError, lz4.block.LZ4BlockError):
+            continue
+        return tab.get("zenSyncId") or None
+    return None
+
+
+def reselect_tab(tab_id: str) -> bool:
+    """On startup Zen selects its empty tab when the restored selection is not in
+    the active space, leaving a blank page; put the user back on their tab."""
+    client = Marionette(host="127.0.0.1", port=2828, socket_timeout=30)
+    try:
+        client.start_session()
+        client.set_context(client.CONTEXT_CHROME)
+        return bool(client.execute_async_script(
+            """
+            const [id] = arguments; const done = arguments[arguments.length - 1];
+            const win = Services.wm.getMostRecentWindow("navigator:browser");
+            const tab = win && win.document.getElementById(id);
+            if (!tab || !win.gBrowser.isTab(tab)) { done(false); return; }
+            const space = tab.getAttribute("zen-workspace-id");
+            const change = space && space !== win.gZenWorkspaces.activeWorkspace
+              ? win.gZenWorkspaces.changeWorkspaceWithID(space) : Promise.resolve();
+            change.then(() => { win.gBrowser.selectedTab = tab; done(win.gBrowser.selectedTab === tab); },
+                        () => done(false));
+            """,
+            script_args=[tab_id],
+        ))
+    except (OSError, MarionetteException):
+        return False
+    finally:
+        try:
+            client.delete_session()
+        except Exception:
+            pass
+
+
 def restart_twilight_with_control() -> bool:
     print("Starting temporary Twilight control", flush=True)
     profile = twilight_profile()
@@ -363,6 +406,7 @@ def restart_twilight_with_control() -> bool:
         print("Twilight did not quit; refusing temporary control", flush=True)
         return False
     before = tab_ids(profile)
+    selected = selected_tab_id(profile)
     backup = snapshot_session(profile)
     if not open_twilight(profile, controlled=True):
         failure = "Twilight did not reopen with control"
@@ -377,6 +421,8 @@ def restart_twilight_with_control() -> bool:
                     request_control(True)
                     if install_bridge():
                         RESTART_BLOCKED.unlink(missing_ok=True)
+                        if selected and not reselect_tab(selected):
+                            print("Could not reselect the tab selected before restart", flush=True)
                         print(f"Temporary Twilight control ready: {len(live_tabs)} tabs", flush=True)
                         return True
                     failure = "Twilight control bridge installation failed"
