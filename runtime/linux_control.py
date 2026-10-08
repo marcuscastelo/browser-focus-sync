@@ -34,7 +34,7 @@ def run(command: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
         command,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
     )
@@ -99,13 +99,18 @@ def stored_structure_hash(profile: Path | None = None) -> str:
 
 def live_tab_ids() -> set[str] | None:
     result = run([str(PYTHON), str(SYNC), "--inspect"], timeout=20)
-    if result.returncode != 0:
-        return None
     try:
         payload = json.loads(result.stdout)
-        return set(payload["tabIds"]) if payload.get("ok") else None
+        if result.returncode == 0 and payload.get("ok"):
+            return set(payload["tabIds"])
     except (json.JSONDecodeError, KeyError, TypeError):
-        return None
+        pass
+    print(
+        f"Twilight tab inspection failed: exit={result.returncode} "
+        f"stdout={(result.stdout or '').strip()!r} stderr={(result.stderr or '').strip()!r}",
+        flush=True,
+    )
+    return None
 
 
 def bridge_ready() -> bool:

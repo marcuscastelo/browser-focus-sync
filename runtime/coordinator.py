@@ -97,16 +97,21 @@ class Coordinator:
             str(SYNC_SCRIPT),
             "--inspect",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=asyncio.subprocess.PIPE,
         )
-        output, _ = await process.communicate()
+        output, errors = await process.communicate()
         try:
             payload = json.loads(output)
-            if process.returncode != 0 or not payload.get("ok"):
-                return None
-            return set(payload["tabIds"])
+            if process.returncode == 0 and payload.get("ok"):
+                return set(payload["tabIds"])
         except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+            pass
+        print(
+            f"Twilight tab inspection failed: exit={process.returncode} "
+            f"stdout={output.decode(errors='replace').strip()!r} stderr={errors.decode(errors='replace').strip()!r}",
+            flush=True,
+        )
+        return None
 
     async def save_linux_active_baseline(self, tab_ids: set[str] | None = None) -> bool:
         identity = self.linux_twilight_identity()
@@ -169,7 +174,7 @@ class Coordinator:
         if not await self.acquire_linux_control():
             return None
         process = None
-        output = b""
+        output = errors = b""
         try:
             process = await asyncio.create_subprocess_exec(
                 str(SYNC),
@@ -177,9 +182,9 @@ class Coordinator:
                 "--ids-json",
                 json.dumps(sorted(ids), separators=(",", ":")),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
             )
-            output, _ = await process.communicate()
+            output, errors = await process.communicate()
         finally:
             clean = await self.release_linux_control()
         if process is None or not clean:
@@ -187,7 +192,11 @@ class Coordinator:
         try:
             payload = json.loads(output)
             if process.returncode != 0 or not payload.get("ok"):
-                print(f"export-linux-tab-records exit={process.returncode} {output.decode(errors='replace').strip()}", flush=True)
+                print(
+                    f"export-linux-tab-records exit={process.returncode} "
+                    f"stdout={output.decode(errors='replace').strip()!r} stderr={errors.decode(errors='replace').strip()!r}",
+                    flush=True,
+                )
                 return None
             return payload["records"]
         except (json.JSONDecodeError, KeyError, TypeError):

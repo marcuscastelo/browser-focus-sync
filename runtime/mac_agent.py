@@ -45,15 +45,21 @@ TWILIGHT_EXECUTABLE = str(cfg.get("mac", "executable", "/Applications/Twilight.a
 
 
 def run(command: list[str], timeout: int = 120, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
+    # stderr stays separate: diagnostics there (e.g. macOS MallocStackLogging) must not
+    # corrupt JSON read from stdout.
     return subprocess.run(
         command,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
         input=input_data,
     )
+
+
+def output(result: subprocess.CompletedProcess[str]) -> str:
+    return f"stdout={(result.stdout or '').strip()!r} stderr={(result.stderr or '').strip()!r}"
 
 
 def mac_idle_seconds() -> float:
@@ -240,13 +246,14 @@ def structure_hash(profile: Path) -> str:
 
 def live_tab_ids() -> set[str] | None:
     result = run([str(PYTHON), str(SYNC), "--inspect"], timeout=20)
-    if result.returncode != 0:
-        return None
     try:
         payload = json.loads(result.stdout)
-        return set(payload["tabIds"]) if payload.get("ok") else None
+        if result.returncode == 0 and payload.get("ok"):
+            return set(payload["tabIds"])
     except (json.JSONDecodeError, KeyError, TypeError):
-        return None
+        pass
+    print(f"Twilight tab inspection failed: exit={result.returncode} {output(result)}", flush=True)
+    return None
 
 
 def snapshot_session(profile: Path) -> Path:
@@ -301,7 +308,9 @@ def open_twilight(profile: Path, *, controlled: bool) -> bool:
     ]
     if controlled:
         command.extend(["--marionette", "--remote-allow-system-access"])
-    if run(command, timeout=15).returncode != 0:
+    result = run(command, timeout=15)
+    if result.returncode != 0:
+        print(f"Twilight open failed: exit={result.returncode} {output(result)}", flush=True)
         return False
     for _ in range(80):
         ready = twilight_running() and marionette_ready() == controlled
@@ -320,19 +329,26 @@ def restart_twilight_with_control() -> bool:
         return False
     before = tab_ids(profile)
     backup = snapshot_session(profile)
-    if open_twilight(profile, controlled=True):
+    if not open_twilight(profile, controlled=True):
+        failure = "Twilight did not reopen with control"
+    else:
+        # "Lost tabs" is only a verdict over ids actually read from the live browser.
+        failure = "Twilight tabs could not be read after restart"
         for _ in range(60):
             live_tabs = live_tab_ids()
-            if live_tabs is not None and before <= live_tabs:
-                request_control(True)
-                if install_bridge():
-                    RESTART_BLOCKED.unlink(missing_ok=True)
-                    print(f"Temporary Twilight control ready: {len(live_tabs)} tabs", flush=True)
-                    return True
-                print("Twilight control bridge installation failed", flush=True)
-                break
+            if live_tabs is not None:
+                missing = before - live_tabs
+                if not missing:
+                    request_control(True)
+                    if install_bridge():
+                        RESTART_BLOCKED.unlink(missing_ok=True)
+                        print(f"Temporary Twilight control ready: {len(live_tabs)} tabs", flush=True)
+                        return True
+                    failure = "Twilight control bridge installation failed"
+                    break
+                failure = f"Twilight restart lost tabs: {len(missing)} of {len(before)} missing"
             time.sleep(1)
-    print("Twilight restart lost tabs; restoring snapshot and refusing Sync", flush=True)
+    print(f"{failure}; restoring snapshot and refusing Sync", flush=True)
     if not quit_twilight():
         RESTART_BLOCKED.touch()
         print("Browser still running; refusing to restore profile files over a live session", flush=True)
@@ -453,7 +469,7 @@ def sync_mac(reason: str) -> bool:
         result = run(command)
     finally:
         authorization.unlink(missing_ok=True)
-    print(f"mac-sync reason={reason} exit={result.returncode} {result.stdout.strip()}", flush=True)
+    print(f"mac-sync reason={reason} exit={result.returncode} {output(result)}", flush=True)
     return result.returncode == 0
 
 
@@ -470,7 +486,7 @@ def apply_linux_tab_deletions(ids: list[str]) -> bool:
             json.dumps(list(dict.fromkeys(ids)), separators=(",", ":")),
         ]
     )
-    print(f"apply-linux-tab-deletions exit={result.returncode} {result.stdout.strip()}", flush=True)
+    print(f"apply-linux-tab-deletions exit={result.returncode} {output(result)}", flush=True)
     return result.returncode == 0
 
 
@@ -485,7 +501,7 @@ def apply_linux_tab_records(records: list[dict[str, object]]) -> bool:
         result = run([str(PYTHON), str(APPLY_TAB_RECORDS), "--records-file", str(incoming)])
     finally:
         incoming.unlink(missing_ok=True)
-    print(f"apply-linux-tab-records exit={result.returncode} {result.stdout.strip()}", flush=True)
+    print(f"apply-linux-tab-records exit={result.returncode} {output(result)}", flush=True)
     return result.returncode == 0
 
 
@@ -503,7 +519,7 @@ def export_tab_records(ids: set[str]) -> list[dict[str, object]] | None:
     try:
         payload = json.loads(result.stdout)
         if result.returncode != 0 or not payload.get("ok"):
-            print(f"export-mac-tab-records exit={result.returncode} {result.stdout.strip()}", flush=True)
+            print(f"export-mac-tab-records exit={result.returncode} {output(result)}", flush=True)
             return None
         return payload["records"]
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -540,7 +556,7 @@ def remote(
     # argument can exceed the remote shell's argument limit.
     result = run([*REMOTE_CTL, "-"], input_data=payload)
     if result.returncode != 0:
-        print(f"remote event={event} exit={result.returncode} {result.stdout.strip()}", flush=True)
+        print(f"remote event={event} exit={result.returncode} {output(result)}", flush=True)
         return None
     try:
         return json.loads(result.stdout)
