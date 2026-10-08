@@ -211,6 +211,12 @@ not an automatic destructive command.
   silently consume pending edits.
 - Tab operations use Zen's private model/applier modules. Temporary control is
   released in `finally`; the low-frequency bridge timer remains resident.
+- Other programs that need the browser (route appliers, a tab MCP) use
+  `runtime/bridge_client.py`, standard library only and Python 3.9 compatible.
+  Its `Lease` holds an exclusive lock on `<data_dir>/<platform>-control.lock`
+  from acquire to release, turns Marionette on only when it was off, and turns it
+  back off only if the request is still its own. It never restarts the browser
+  or installs a bridge.
 - Native Spaces sync is separate and opt-in; bulk deletion guards do not make it
   a conflict-free merge engine. Simultaneous editing and large handoff payloads
   still need hardening. Missing/corrupt baselines fail closed, not auto-reseeded.
