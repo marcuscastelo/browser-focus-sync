@@ -28,7 +28,7 @@ def main() -> int:
     try:
         client.start_session()
         client.set_context(client.CONTEXT_CHROME)
-        records = client.execute_script(
+        result = client.execute_script(
             """
             const { ZenSpacesSyncModel } = ChromeUtils.importESModule(
               "resource:///modules/zen/ZenSpacesSyncModel.sys.mjs"
@@ -37,7 +37,11 @@ def main() -> int:
             const { ZenSessionStore } = ChromeUtils.importESModule(
               "resource:///modules/zen/ZenSessionManager.sys.mjs");
             const sidebar = ZenSessionStore.getSidebarData() || {};
-            return arguments[0].map(id => {
+            // Zen's own empty tabs (folder placeholders, the new-tab surface) are never
+            // synced; report them apart so they do not count as failed exports.
+            const structural = arguments[0].filter(
+              id => (sidebar.tabs || []).some(t => t.zenSyncId === id && t.zenIsEmpty));
+            const exported = arguments[0].map(id => {
               let projected = ZenSpacesSyncModel.projectRecord(id);
               if (!projected) {
                 const t = (sidebar.tabs || []).find(t => t.zenSyncId === id);
@@ -61,6 +65,7 @@ def main() -> int:
               }
               return { id, cleartext: { id, kind: projected.kind, data } };
             }).filter(Boolean);
+            return { records: exported, structural };
             """,
             script_args=[ids],
         )
@@ -72,10 +77,17 @@ def main() -> int:
             client.delete_session()
         except Exception:
             pass
-    if len(records) != len(ids) and not args.allow_excluded:
-        print(json.dumps({"ok": False, "error": "not every opened tab could be exported", "requested": len(ids), "exported": len(records)}))
+    return report(ids, result, allow_excluded=args.allow_excluded)
+
+
+def report(ids: list[str], result: dict, *, allow_excluded: bool = False) -> int:
+    records = result["records"]
+    structural = set(result["structural"]) - {r["id"] for r in records}
+    missing = set(ids) - {r["id"] for r in records} - structural
+    if missing and not allow_excluded:
+        print(json.dumps({"ok": False, "error": "not every opened tab could be exported", "requested": len(ids), "exported": len(records), "structural": len(structural)}))
         return 1
-    print(json.dumps({"ok": True, "records": records, "excludedIds": sorted(set(ids) - {r['id'] for r in records})}, separators=(",", ":")))
+    print(json.dumps({"ok": True, "records": records, "structuralIds": sorted(structural), "excludedIds": sorted(missing | structural)}, separators=(",", ":")))
     return 0
 
 
