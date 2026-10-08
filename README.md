@@ -216,7 +216,10 @@ not an automatic destructive command.
   Its `Lease` holds an exclusive lock on `<data_dir>/<platform>-control.lock`
   from acquire to release, turns Marionette on only when it was off, and turns it
   back off only if the request is still its own. It never restarts the browser
-  or installs a bridge.
+  or installs a bridge: without a bridge it refuses (`bridge_unavailable`), and a
+  restart stays a separate path in `mac_agent`. While held,
+  `<platform>-control.holder.json` names the holder (`pid`, `label`, `since` in ms);
+  `bridge_client.holder()` reads it for diagnostics.
 - Native Spaces sync is separate and opt-in; bulk deletion guards do not make it
   a conflict-free merge engine. Simultaneous editing and large handoff payloads
   still need hardening. Missing/corrupt baselines fail closed, not auto-reseeded.
