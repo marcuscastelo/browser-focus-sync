@@ -23,6 +23,11 @@ remote_ctl = "~/.local/share/browser-focus-sync/venv/bin/python ~/.local/share/b
 # Opt-in: a missing in-process bridge may require one protected restart.
 # Leave false unless you accept browser restarts during handoff.
 allow_restart = false
+# Opt-in, when this Mac is the Deskflow server: its own keyboard and mouse keep it
+# "active" while driving the Linux screen. Point at the server log and name this
+# Mac's screen so the agent treats time on the other screen as idle.
+# deskflow_server_log = "~/Library/Logs/deskflow-server.log"
+# deskflow_screen = "mac"
 
 [sync]
 # Structural changes use Zen's native Spaces engine; opt-in because native

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import base64
 import configparser
 import ctypes
@@ -73,7 +74,41 @@ def mac_idle_seconds() -> float:
         function.restype = ctypes.c_double
         mac_idle_seconds._function = function
         mac_idle_seconds._library = library
-    return float(function(0, 0xFFFFFFFF))
+    hid_idle = float(function(0, 0xFFFFFFFF))
+    away = seconds_on_other_screen()
+    return hid_idle if away is None else max(hid_idle, away)
+
+
+DESKFLOW_LOG = cfg.get("mac", "deskflow_server_log", "")
+DESKFLOW_SCREEN = str(cfg.get("mac", "deskflow_screen", ""))
+DESKFLOW_SWITCH = re.compile(r'^\[(\S+)\] INFO: switch from "[^"]*" to "([^"]*)"')
+
+
+def seconds_on_other_screen() -> float | None:
+    """With this Mac as the Deskflow server, its keyboard and mouse stay physically
+    busy while they drive another screen, so HID idle never reaches the threshold.
+    The server log's last screen switch tells where the user actually is."""
+    if not DESKFLOW_LOG or not DESKFLOW_SCREEN:
+        return None
+    try:
+        with open(Path(DESKFLOW_LOG).expanduser(), "rb") as log:
+            log.seek(0, 2)
+            log.seek(max(0, log.tell() - 65536))
+            lines = log.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        match = DESKFLOW_SWITCH.match(line)
+        if not match:
+            continue
+        if match.group(2) == DESKFLOW_SCREEN:
+            return None
+        try:
+            switched = time.mktime(time.strptime(match.group(1).split(".")[0], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            return None
+        return max(0.0, time.time() - switched)
+    return None
 
 
 def marionette_ready() -> bool:
