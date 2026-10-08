@@ -120,6 +120,28 @@ class LeaseTests(unittest.TestCase):
         with self.lease():
             pass
 
+    def test_holder_file_names_who_holds_the_lock(self):
+        self.bridge()
+        first = self.lease(label="coordinator").acquire()
+        try:
+            state = bc.holder(self.paths)
+            self.assertEqual((state["label"], state["pid"], state["alive"]), ("coordinator", os.getpid(), True))
+            self.assertLessEqual(state["since"], time.time() * 1000)
+            with self.assertRaises(bc.BridgeError) as caught:
+                self.lease(label="mcp").acquire()
+            self.assertIn("coordinator", str(caught.exception))
+        finally:
+            first.release()
+        self.assertIsNone(bc.holder(self.paths))
+
+    def test_no_bridge_never_restarts_anything(self):
+        with patch.object(bc.subprocess, "run") as run, patch.object(bc.subprocess, "Popen") as popen:
+            with self.assertRaises(bc.BridgeError) as caught:
+                self.lease(system="Linux").acquire()
+        self.assertEqual(caught.exception.code, "bridge_unavailable")
+        popen.assert_not_called()
+        run.assert_not_called()
+
     def test_stale_bridge_is_refused_without_touching_request(self):
         bridge = self.bridge(updated_at=(time.time() - 600) * 1000)
         with self.assertRaises(bc.BridgeError) as caught:

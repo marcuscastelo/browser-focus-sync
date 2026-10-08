@@ -61,6 +61,7 @@ class Paths(NamedTuple):
     request: Path
     status: Path
     lock: Path
+    holder: Path
 
 
 # --- configuration ---------------------------------------------------------
@@ -133,6 +134,7 @@ def bridge_paths(directory: Path, prefix: Optional[str] = None) -> Paths:
         directory / f"{prefix}-control-request",
         directory / f"{prefix}-control-bridge.json",
         directory / f"{prefix}-control.lock",
+        directory / f"{prefix}-control.holder.json",
     )
 
 
@@ -301,6 +303,25 @@ def wait_clean(paths: Paths, identity: str, timeout: float) -> bool:
 
 # --- lease -----------------------------------------------------------------
 
+def holder(paths: Paths) -> Optional[Dict[str, Any]]:
+    """Who holds the lock and since when (ms), for diagnostics; None when free.
+
+    A holder killed mid-lease leaves its file behind; ``alive`` says whether its pid
+    still runs (the kernel already dropped its lock)."""
+    try:
+        state = json.loads(paths.holder.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    try:
+        os.kill(int(state.get("pid", 0)), 0)
+        state["alive"] = True
+    except (OSError, ValueError):
+        state["alive"] = False
+    return state
+
+
 class Lease:
     """Exclusive use of Marionette through the bridge, from acquire to release.
 
@@ -312,7 +333,7 @@ class Lease:
     def __init__(self, port: int = DEFAULT_PORT, directory: Optional[Path] = None,
                  executable_path: Optional[str] = None, prefix: Optional[str] = None,
                  lock_timeout: float = 30.0, start_timeout: float = 15.0,
-                 stop_timeout: float = 15.0, system: Optional[str] = None):
+                 stop_timeout: float = 15.0, system: Optional[str] = None, label: str = ""):
         settings = load_settings() if directory is None or executable_path is None else {}
         self.system = system or platform.system()
         self.prefix = prefix or platform_prefix(self.system)
@@ -322,6 +343,7 @@ class Lease:
         self.lock_timeout = lock_timeout
         self.start_timeout = start_timeout
         self.stop_timeout = stop_timeout
+        self.label = label or Path(os.environ.get("_", "") or "python").name
         self.identity: Optional[str] = None
         self.inherited = False
         self._lock_fd: Optional[int] = None
@@ -340,6 +362,7 @@ class Lease:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self._lock_fd = descriptor
+                self._write_holder()
                 return
             except OSError as error:
                 if error.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
@@ -347,11 +370,29 @@ class Lease:
                     raise
             if time.monotonic() >= deadline:
                 os.close(descriptor)
-                raise BridgeError("bridge_busy", "Another user holds Twilight control (focus-sync handoff?)")
+                current = holder(self.paths) or {}
+                who = f" ({current.get('label')}, pid {current.get('pid')})" if current else ""
+                raise BridgeError("bridge_busy", f"Another user holds Twilight control{who}")
             time.sleep(0.1)
+
+    def _write_holder(self) -> None:
+        descriptor, temporary = tempfile.mkstemp(prefix=".control-holder-", dir=str(self.paths.directory))
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "label": self.label, "since": int(time.time() * 1000)}, stream)
+            os.replace(temporary, self.paths.holder)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def _unlock(self) -> None:
         if self._lock_fd is not None:
+            current = holder(self.paths)
+            if current and current.get("pid") == os.getpid():
+                try:
+                    self.paths.holder.unlink()
+                except OSError:
+                    pass
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             os.close(self._lock_fd)
             self._lock_fd = None
