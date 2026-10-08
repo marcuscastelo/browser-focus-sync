@@ -20,6 +20,18 @@ jobs:
         env:
           PYTHONPATH: runtime
           BROWSER_FOCUS_SYNC_CONFIG: /tmp/browser-focus-sync-ci-no-config.toml
+  bridge-client-py39:
+    # bridge_client.py also runs under the Mac's /usr/bin/python3 (3.9) over SSH.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python -m unittest tests.test_bridge_client -v
+        env:
+          PYTHONPATH: runtime
+          BROWSER_FOCUS_SYNC_CONFIG: /tmp/browser-focus-sync-ci-no-config.toml
   linux-idle-helper:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
