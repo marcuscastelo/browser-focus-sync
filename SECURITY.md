@@ -24,6 +24,10 @@ system. Test with disposable profiles before using your everyday session.
 - Closure propagation intentionally deletes tabs in the other browser. Browser
   restart mismatch suppresses deletion inference for that handoff, but this is
   not a formal conflict-free replication protocol. Take independent backups.
+- Structure handoff deletes Spaces, folders and split views in the other browser
+  when they disappear here, with the same restart rule as tabs; a Space or folder
+  that still holds tabs the handoff does not close is kept. It is not a
+  conflict-free merge either.
 - Native structural sync is off by default. Enabling it uses Mozilla Sync and
   inherits Zen's conflict resolution, including deletions. The tombstone guard
   is not a universal no-data-loss guarantee.

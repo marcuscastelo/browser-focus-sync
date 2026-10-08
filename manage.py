@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME_FILES = (
     "bfs_config.py", "coordinator.py", "linux_control.py", "mac_agent.py",
-    "sync_now.py", "apply_tab_records.py", "apply_tab_deletions.py",
+    "sync_now.py", "structure.py", "structure_records.py", "bridge_client.py",
     "export_tab_records.py", "focusctl.py",
 )
 LABEL = "io.github.browser-focus-sync"

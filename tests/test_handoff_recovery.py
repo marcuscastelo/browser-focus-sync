@@ -57,17 +57,18 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(m.enter_mac());save.assert_not_called()
     def test_mac_enter_retains_pending_edits_from_before_handoff(self):
         response={'ok':True,'owner':'linux','handoffId':'h','openedTabRecords':[],'closedTabIds':[]}
-        with patch.object(m,'remote',side_effect=[response,{'ok':True,'owner':'mac'}]),patch.object(m,'active_baseline_ids',return_value={'keep'}),patch.object(m,'twilight_profile'),patch.object(m,'tab_ids',return_value={'keep','unsent'}),patch.object(m,'save_active_baseline',return_value=True) as save:
+        with patch.object(m,'remote',side_effect=[response,{'ok':True,'owner':'mac'}]),patch.object(m,'active_baseline_ids',return_value={'keep'}),patch.object(m,'twilight_profile'),patch.object(m,'tab_ids',return_value={'keep','unsent'}),patch.object(m,'fingerprint',return_value='fp'),patch.object(m,'save_active_baseline',return_value=True) as save:
             self.assertTrue(m.enter_mac());self.assertEqual(save.call_args.kwargs['tab_ids_override'],{'keep'})
     def test_mac_restart_does_not_send_deletions(self):
         calls=[]
         def remote(event,**kwargs):
             calls.append((event,kwargs))
             return {'ok':True,'linux_idle':False,'owner':'linux' if event=='linux-synced' else 'mac'}
-        with patch.object(m,'ACTIVE_BASELINE',self.path),patch.object(m,'remote',side_effect=remote),patch.object(m,'twilight_identity',return_value='new'),patch.object(m,'twilight_profile'),patch.object(m,'tab_ids',return_value={'keep','new'}),patch.object(m,'ensure_control',return_value=True),patch.object(m,'release_control',return_value=True),patch.object(m,'live_tab_ids',return_value={'keep','new'}),patch.object(m,'export_tab_records',return_value=[]),patch.object(m,'save_active_baseline',return_value=True),patch.object(m,'sync_mac') as native:
+        with patch.object(m,'ACTIVE_BASELINE',self.path),patch.object(m,'remote',side_effect=remote),patch.object(m,'twilight_identity',return_value='new'),patch.object(m,'twilight_profile'),patch.object(m,'tab_ids',return_value={'keep','new'}),patch.object(m,'ensure_control',return_value=True),patch.object(m,'release_control',return_value=True),patch.object(m,'live_tab_ids',return_value={'keep','new'}),patch.object(m,'export_tab_records',return_value=[]),patch.object(m,'save_active_baseline',return_value=True),patch.object(m,'sync_mac') as native,patch.object(m,'fingerprint',return_value='fp'),patch.object(m,'structure_changes',return_value=([],[],{})) as structure:
             self.assertTrue(m.leave_mac_for_linux())
             sent=next(args for event,args in calls if event=='mac-idle')
             self.assertEqual(sent['closed_tab_ids'],set());native.assert_not_called()
+            self.assertFalse(structure.call_args.kwargs['same_browser'])
     def test_linux_bootstrap_ignores_bridge_of_exiting_browser(self):
         with patch.object(lc,'marionette_ready',side_effect=[False,True]),patch.object(lc,'time'),patch.object(lc,'bridge_ready',return_value=True),patch.object(lc,'request_control'),patch.object(lc,'install_bridge',return_value=True) as install,patch.object(lc,'release',return_value=True):
             self.assertTrue(lc.bootstrap());install.assert_called_once()

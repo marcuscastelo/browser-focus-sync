@@ -15,7 +15,9 @@ from pathlib import Path
 
 import bfs_config as cfg
 
+import bridge_client
 import lz4.block
+import structure
 from marionette_driver.errors import MarionetteException
 from marionette_driver.marionette import Marionette
 
@@ -27,6 +29,9 @@ EXECUTABLE = str(cfg.get("linux", "executable", ""))
 RESTART_BLOCKED = BASE / "linux-restart-blocked"
 CONTROL_REQUEST = BASE / "linux-control-request"
 BRIDGE_STATUS = BASE / "linux-control-bridge.json"
+# One lease per process, held from the first need of control to the end of the
+# handoff, so the Twilight MCP and route applier wait instead of interleaving.
+LEASE = bridge_client.Lease(directory=BASE, executable_path=EXECUTABLE, prefix="linux")
 
 
 def run(command: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -86,6 +91,10 @@ def stored_tab_ids(profile: Path | None = None) -> set[str]:
     payload = (profile / "zen-sessions.jsonlz4").read_bytes()
     data = json.loads(lz4.block.decompress(payload[8:]))
     return {tab["zenSyncId"] for tab in data.get("tabs", []) if tab.get("zenSyncId")}
+
+
+def stored_fingerprint(profile: Path | None = None) -> str:
+    return structure.stored_fingerprint(profile or profile_path())
 
 
 def stored_structure_hash(profile: Path | None = None) -> str:
@@ -207,31 +216,6 @@ def install_bridge() -> bool:
             pass
 
 
-def wait_for_control(enabled: bool, attempts: int = 80) -> bool:
-    for _ in range(attempts):
-        if marionette_ready() == enabled:
-            return True
-        time.sleep(0.25)
-    return False
-
-
-def wait_for_bridge_clean(attempts: int = 40) -> bool:
-    identity = twilight_identity()
-    for _ in range(attempts):
-        try:
-            status = json.loads(BRIDGE_STATUS.read_text())
-            if (
-                status.get("identity") == identity
-                and status.get("running") is False
-                and status.get("webdriverActive") is False
-            ):
-                return True
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
-        time.sleep(0.1)
-    return False
-
-
 def snapshot_session(profile: Path) -> Path:
     backup = BASE / "linux-restart-backups" / str(time.time_ns())
     backup.mkdir(parents=True)
@@ -300,19 +284,18 @@ def start_twilight(*, controlled: bool) -> bool:
 
 
 def acquire() -> bool:
-    if marionette_ready():
+    if marionette_ready() and not bridge_ready():
+        # The launcher's startup listener, before bootstrap installed the bridge.
         request_control(True)
-        if not bridge_ready() and not install_bridge():
+        if not install_bridge():
+            print("Linux Marionette is listening but the control bridge could not be installed", flush=True)
             return False
-        return wait_for_control(True)
-    if bridge_ready():
-        request_control(True)
-        if wait_for_control(True):
-            print("Temporary Linux Twilight control enabled in place", flush=True)
-            return True
+    try:
+        LEASE.acquire()
+    except bridge_client.BridgeError as error:
+        print(f"Linux Twilight control unavailable ({error.code}): {error}; refusing to restart it", flush=True)
         return False
-    print("Linux Twilight has no in-process control bridge; refusing to restart it", flush=True)
-    return False
+    return True
 
 
 def bootstrap() -> bool:
@@ -331,19 +314,17 @@ def bootstrap() -> bool:
 
 
 def release() -> bool:
-    if not marionette_ready():
-        return True
-    print("Stopping temporary Linux Twilight control", flush=True)
-    if not bridge_ready() and not install_bridge():
-        print("Cannot install in-process Twilight control; leaving listener unchanged", flush=True)
-        return False
-    request_control(False)
-    if not wait_for_control(False):
-        print("Linux Marionette did not stop in place", flush=True)
-        return False
-    clean = wait_for_bridge_clean()
-    if clean:
-        print("Linux Twilight control disabled in place", flush=True)
+    """End this process's lease and leave Marionette off, whoever turned it on."""
+    if not LEASE.held:
+        if not marionette_ready():
+            return True
+        try:
+            LEASE.acquire()
+        except bridge_client.BridgeError as error:
+            print(f"Cannot take Linux Twilight control to stop it ({error.code}): {error}", flush=True)
+            return False
+    clean = LEASE.release(force_off=True)
+    print("Linux Twilight control disabled in place" if clean else "Linux Marionette did not stop in place", flush=True)
     return clean
 
 
