@@ -219,11 +219,22 @@ def install_bridge() -> bool:
 
 def twilight_pid() -> str | None:
     result = run(["/bin/ps", "-axo", "pid=,command="], timeout=5)
+    profile = cfg.configured_profile("mac")
     for line in result.stdout.splitlines():
         fields = line.strip().split(maxsplit=1)
         if len(fields) == 2 and fields[1].split(maxsplit=1)[0] == TWILIGHT_EXECUTABLE:
+            if profile is not None and not mac_command_runs_profile(fields[1], profile):
+                continue
             return fields[0]
     return None
+
+
+def mac_command_runs_profile(command: str, profile: Path) -> bool:
+    """ps joins arguments with spaces and profile paths contain spaces: compare text."""
+    if " --profile " not in command and " -profile " not in command:
+        return True  # opened from the Dock: the default profile, ours
+    expected = str(profile.expanduser())
+    return f"--profile {expected}" in command or f"-profile {expected}" in command
 
 
 def twilight_running() -> bool:

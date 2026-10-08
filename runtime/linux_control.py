@@ -52,12 +52,15 @@ def profile_path() -> Path:
 def twilight_pid() -> int | None:
     # A quick restart briefly leaves the exiting browser alive; prefer the newest.
     newest: tuple[int, int] | None = None
+    profile = cfg.configured_profile("linux")
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
         try:
             command = (proc / "cmdline").read_bytes().split(b"\0")
             if not command or command[0].decode() != EXECUTABLE or b"-contentproc" in command:
+                continue
+            if cfg.runs_other_profile([part.decode() for part in command], profile):
                 continue
             started = int((proc / "stat").read_text().rsplit(")", 1)[1].split()[19])
         except (FileNotFoundError, PermissionError, UnicodeDecodeError, IndexError, ValueError):

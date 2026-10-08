@@ -38,6 +38,33 @@ def profile(platform: str) -> Path:
     return result
 
 
+def runs_other_profile(arguments: list[str], configured: Path | None) -> bool:
+    """Whether a browser command line explicitly names a profile other than ours.
+
+    A second Twilight (a disposable test profile, another channel) shares the
+    executable; taking it for ours hid the real bridge. A browser started
+    without --profile (the macOS Dock) is still ours.
+    """
+    if configured is None:
+        return False
+    named = None
+    for index, argument in enumerate(arguments):
+        if argument in ("--profile", "-profile") and index + 1 < len(arguments):
+            named = arguments[index + 1]
+        elif argument.startswith("--profile="):
+            named = argument.split("=", 1)[1]
+    if named is None:
+        return False
+    return Path(named).expanduser().resolve() != configured.expanduser().resolve()
+
+
+def configured_profile(platform: str) -> Path | None:
+    try:
+        return path(platform, "profile")
+    except ValueError:
+        return None
+
+
 CODE_DIR = Path(__file__).resolve().parent
 DATA_DIR = path("paths", "data_dir", "~/.local/share/browser-focus-sync")
 STATE_DIR = path("paths", "state_dir", "~/.local/state/browser-focus-sync")
