@@ -408,13 +408,7 @@ class Lease:
                 self.inherited = True
                 self.identity = browser_identity(self.executable, self.system)
                 return self
-            # The bridge rewrites its status file in place; retry a torn read.
-            identity = None
-            for _ in range(8):
-                identity = current_bridge(self.paths, self.executable, self.system)
-                if identity is not None:
-                    break
-                time.sleep(0.125)
+            identity = self._fresh_bridge()
             if identity is None:
                 raise BridgeError("bridge_unavailable",
                                   "Twilight control bridge is unavailable or stale; refusing to restart the browser")
@@ -428,6 +422,16 @@ class Lease:
         except BaseException:
             self._unlock()
             raise
+
+    def _fresh_bridge(self) -> Optional[str]:
+        """``current_bridge`` with retries: the bridge rewrites its status file in
+        place, so one read can catch it half written."""
+        for attempt in range(8):
+            identity = current_bridge(self.paths, self.executable, self.system)
+            if identity is not None or attempt == 7:
+                return identity
+            time.sleep(0.125)
+        return None
 
     def _turn_off(self) -> bool:
         if self._owned_mtime is None:
@@ -449,7 +453,7 @@ class Lease:
             return True
         try:
             if force_off and self._owned_mtime is None and listening(self.port):
-                identity = current_bridge(self.paths, self.executable, self.system)
+                identity = self._fresh_bridge()
                 if identity is None:
                     return False
                 self.identity = identity

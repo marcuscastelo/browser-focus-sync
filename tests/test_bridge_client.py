@@ -108,6 +108,22 @@ class LeaseTests(unittest.TestCase):
         self.assertTrue(lease.release(force_off=True))
         self.assertFalse(bc.listening(self.port))
 
+    def test_force_off_survives_a_torn_status_read(self):
+        self.paths.request.write_text("on")
+        self.bridge()
+        self.assertTrue(bc.wait_listening(self.port, True, 3))
+        lease = self.lease().acquire()
+        real = bc.current_bridge
+        reads = []
+
+        def torn_once(*args, **kwargs):
+            reads.append(1)
+            return None if len(reads) == 1 else real(*args, **kwargs)
+        with patch.object(bc, "current_bridge", side_effect=torn_once):
+            self.assertTrue(lease.release(force_off=True))
+        self.assertGreater(len(reads), 1)
+        self.assertFalse(bc.listening(self.port))
+
     def test_lock_is_exclusive_across_leases(self):
         self.bridge()
         first = self.lease().acquire()
