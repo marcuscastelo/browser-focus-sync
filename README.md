@@ -138,9 +138,21 @@ Immediately run this in another terminal on that machine:
 It installs the in-process bridge and turns Marionette off. It must report
 success; do not leave the browser in automation mode if setup fails. Browser
 restarts remove the injected bridge. On Linux repeat the explicit bootstrap
-after a normal restart; it will **not** automatically restart your browser. On
-Mac you can opt into one backed-up restart with `mac.allow_restart = true`, or
-repeat the manual bootstrap instead.
+after a normal restart; it will **not** automatically restart your browser.
+
+On Mac the agent never restarts the browser on its own either:
+- When the browser restarts itself (an update, `about:restart`) after being opened
+  with the flags above, it inherits `MOZ_MARIONETTE` and
+  `MOZ_REMOTE_ALLOW_SYSTEM_ACCESS`; the agent installs the bridge in place and turns
+  Marionette off within seconds.
+- When it was opened without them (Dock, a link, after login), nothing can install
+  the bridge without a restart. The first handoff that needs control shows one
+  notification per browser process and waits. Restart it when convenient with
+  `.venv/bin/python runtime/mac_agent.py reopen`: the running agent quits and reopens
+  the browser between handoffs, with a session snapshot and a check that every tab
+  came back, and prints the result. Set `mac.reopen_command` to the command shown in
+  the notification.
+- `mac.allow_restart = true` opts back into one backed-up restart during a handoff.
 
 ## Establish an initial baseline
 

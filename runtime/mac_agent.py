@@ -40,6 +40,14 @@ REMOTE_CTL = [
 IDLE_SECONDS = 8
 IDLE_PROBE_SECONDS = 10
 RESTART_BLOCKED = BASE / "restart-blocked"
+# `mac_agent.py reopen` asks the running agent to restart Twilight with control now;
+# the agent answers in REOPEN_RESULT. Without the request it never restarts it unless
+# `allow_restart` opts in.
+REOPEN_REQUEST = BASE / "reopen-request"
+REOPEN_RESULT = BASE / "reopen-result.json"
+REOPEN_TIMEOUT_SECONDS = 300
+# The Twilight identity last told about a missing bridge: one notice per browser process.
+BRIDGE_NOTICE = BASE / "bridge-missing-notice"
 ACTIVE_BASELINE = BASE / "active-baseline.json"
 CONTROL_REQUEST = BASE / "mac-control-request"
 BRIDGE_STATUS = BASE / "mac-control-bridge.json"
@@ -446,26 +454,110 @@ def take_lease() -> bool:
         return False
 
 
+def notify_bridge_missing(reason: str) -> None:
+    """Tell the user once per Twilight process that handoffs wait for them to reopen
+    it with control; the agent itself never chooses when to restart the browser."""
+    identity = twilight_identity() or "none"
+    try:
+        if BRIDGE_NOTICE.read_text() == identity:
+            return
+    except OSError:
+        pass
+    BRIDGE_NOTICE.write_text(identity)
+    hint = str(cfg.get("mac", "reopen_command", f"{PYTHON} {Path(__file__).resolve()} reopen"))
+    print(f"{reason}; handoffs wait until Twilight is reopened with control ({hint})", flush=True)
+    message = f"Tab handoff is paused: {reason}. Reopen Twilight with control when convenient: {hint}"
+    script = f"display notification {json.dumps(message)} with title \"Browser focus sync\""
+    try:
+        run(["/usr/bin/osascript", "-e", script], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def ensure_control() -> bool:
     if LEASE.held:
         return True
     if marionette_ready() and not bridge_ready():
         request_control(True)
         if not install_bridge():
-            # Seen after Twilight restarted itself with an inherited
-            # MOZ_MARIONETTE: the port listens but never completes a session.
-            print("Marionette is listening but the control bridge could not be installed", flush=True)
+            notify_bridge_missing("Marionette is listening but the control bridge could not be installed")
             return False
     if not twilight_running():
         return False
     if bridge_ready() or marionette_ready():
         return take_lease()
+    if not cfg.get("mac", "allow_restart", False):
+        notify_bridge_missing("Twilight was opened without the control bridge")
+        return False
     if RESTART_BLOCKED.exists():
         return False
-    if not cfg.get("mac", "allow_restart", False):
-        print("Control bridge missing; restart is disabled by configuration", flush=True)
-        return False
     return restart_twilight_with_control() and take_lease()
+
+
+ADOPTION_FAILED: set[str] = set()
+
+
+def adopt_startup_listener() -> None:
+    """Twilight restarting itself (an update, about:restart) inherits MOZ_MARIONETTE and
+    MOZ_REMOTE_ALLOW_SYSTEM_ACCESS from the process the agent opened with control, so it
+    comes back with Marionette on and no bridge. Install the bridge and turn Marionette
+    off right away, as the Linux launcher's bootstrap does, instead of leaving
+    navigator.webdriver on until the next handoff needs control."""
+    if LEASE.held or not marionette_ready() or bridge_ready():
+        return
+    identity = twilight_identity()
+    if identity is None or identity in ADOPTION_FAILED:
+        return
+    request_control(True)
+    if install_bridge() and release_control():
+        print(f"Control bridge installed in place for Twilight {identity}", flush=True)
+        return
+    ADOPTION_FAILED.add(identity)
+    notify_bridge_missing("Marionette is listening but the control bridge could not be installed")
+
+
+def reopen_with_control() -> dict[str, object]:
+    before = twilight_identity()
+    if before is None:
+        return {"ok": False, "error": "Twilight is not running"}
+    if bridge_ready():
+        return {"ok": True, "restarted": False, "identity": before, "message": "control bridge already installed"}
+    ok = restart_twilight_with_control() and release_control()
+    return {"ok": ok, "restarted": True, "before": before, "identity": twilight_identity()}
+
+
+def handle_reopen_request() -> None:
+    try:
+        request = REOPEN_REQUEST.read_text().strip()
+    except OSError:
+        return
+    REOPEN_REQUEST.unlink(missing_ok=True)
+    print("Reopening Twilight with control, as requested", flush=True)
+    result = {"request": request, **reopen_with_control()}
+    temporary = REOPEN_RESULT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(result))
+    temporary.replace(REOPEN_RESULT)
+
+
+def request_reopen() -> int:
+    """`mac_agent.py reopen`: the running agent restarts Twilight between handoffs, so
+    nothing else writes to the browser while it quits and comes back."""
+    request = str(time.time_ns())
+    REOPEN_RESULT.unlink(missing_ok=True)
+    REOPEN_REQUEST.write_text(request)
+    deadline = time.monotonic() + REOPEN_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            result = json.loads(REOPEN_RESULT.read_text())
+        except (OSError, ValueError):
+            result = None
+        if isinstance(result, dict) and result.get("request") == request:
+            print(json.dumps(result))
+            return 0 if result.get("ok") else 1
+        time.sleep(1)
+    REOPEN_REQUEST.unlink(missing_ok=True)
+    print(json.dumps({"ok": False, "error": "the agent did not answer; is it running?"}))
+    return 1
 
 
 def release_control() -> bool:
@@ -890,6 +982,8 @@ def main() -> int:
     enter_confirmed = False
     next_enter_probe_at = 0.0
     while True:
+        handle_reopen_request()
+        adopt_startup_listener()
         mac_is_active = mac_idle_seconds() < IDLE_SECONDS
         if mac_was_active is None:
             mac_was_active = mac_is_active
@@ -922,4 +1016,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["reopen"]:
+        sys.exit(request_reopen())
     sys.exit(main())

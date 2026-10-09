@@ -21,8 +21,11 @@ linux_host = "linux-sync"
 # Executed by the remote user's shell. Adjust if Linux uses non-default paths.
 remote_ctl = "~/.local/share/browser-focus-sync/venv/bin/python ~/.local/share/browser-focus-sync/runtime/focusctl.py"
 # Opt-in: a missing in-process bridge may require one protected restart.
-# Leave false unless you accept browser restarts during handoff.
+# Leave false unless you accept browser restarts during handoff; otherwise the agent
+# notifies once and waits for `runtime/mac_agent.py reopen`.
 allow_restart = false
+# Command shown in that notification.
+# reopen_command = "~/.local/share/browser-focus-sync/venv/bin/python ~/.local/share/browser-focus-sync/runtime/mac_agent.py reopen"
 # Opt-in, when this Mac is the Deskflow server: its own keyboard and mouse keep it
 # "active" while driving the Linux screen. Point at the server log and name this
 # Mac's screen so the agent treats time on the other screen as idle.

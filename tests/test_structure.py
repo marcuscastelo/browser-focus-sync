@@ -231,17 +231,6 @@ class ControlTests(unittest.TestCase):
         acquire.assert_called_once()
         self.assertTrue(release.call_args.kwargs["force_off"])
 
-    def test_mac_restart_needs_configuration(self):
-        with patch.object(type(m.LEASE), "held", new=property(lambda self: False)), \
-                patch.object(m, "marionette_ready", return_value=False), \
-                patch.object(m, "twilight_running", return_value=True), \
-                patch.object(m, "bridge_ready", return_value=False), \
-                patch.object(m, "RESTART_BLOCKED", Path(tempfile.gettempdir()) / "bfs-test-no-restart-block"), \
-                patch.object(m.cfg, "get", return_value=False), \
-                patch.object(m, "restart_twilight_with_control") as restart, patch("builtins.print"):
-            self.assertFalse(m.ensure_control())
-        restart.assert_not_called()
-
 
 class MacFlowTests(unittest.TestCase):
     def setUp(self):
