@@ -124,6 +124,20 @@ const survivors = (kind, id) => win.gBrowser.tabs.filter(tab =>
   // resurrecting it would undo a deletion made here.
   const skipped = records.filter(record => record.op === "update" && !exists(record)).map(r => r.id);
   const batch = records.filter(record => !skipped.includes(record.id));
+  // Zen's applier moves a tab between Spaces only when its zen-workspace-id
+  // differs. A tab whose attribute names the Space but whose element sits in
+  // another Space's section can then never be ordered. Put every direct tab
+  // child of an incoming Space in that Space's section first; tabs already
+  // there are left alone.
+  for (const record of batch) {
+    if (record.cleartext.kind !== "space") continue;
+    for (const id of record.cleartext.data.children || []) {
+      const tab = win.document.getElementById(id);
+      if (win.gBrowser.isTab(tab) && !tab.group && !tab.hasAttribute("zen-essential")) {
+        win.gZenWorkspaces.moveTabToWorkspace(tab, record.id);
+      }
+    }
+  }
   // Native Spaces records omit ordinary about:blank tabs; create them directly.
   for (const record of tabRecords) {
     const d = record.cleartext.data;
