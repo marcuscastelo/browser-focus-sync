@@ -7,10 +7,26 @@ import socket
 import sys
 import bfs_config as cfg
 
+USAGE = "usage: focusctl.py status|mac-active|base64:PAYLOAD|- (stdin)"
+HELP = USAGE + """
+
+Send one request to the local coordinator socket and print its JSON reply.
+This is the coordinator's protocol client: it does not open URLs or touch the browser.
+
+  status          read the coordinator state; no side effects
+  mac-active      report the Mac as active: starts a handoff (sent by mac_agent over SSH)
+  base64:PAYLOAD  URL-safe base64 of a JSON request (sent by mac_agent)
+  -               read the request from stdin
+
+Exit status: 0 when the reply has "ok": true, 1 otherwise, 2 on a usage error."""
+
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: focusctl.py status|mac-active|base64:PAYLOAD|- (stdin)", file=sys.stderr)
+    if len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help"):
+        print(HELP)
+        return 0
+    if len(sys.argv) != 2 or sys.argv[1].startswith("-") and sys.argv[1] != "-":
+        print(USAGE, file=sys.stderr)
         return 2
     payload = sys.argv[1]
     if payload == "-":
