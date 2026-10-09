@@ -139,13 +139,15 @@ const survivors = (kind, id) => win.gBrowser.tabs.filter(tab =>
     }
   }
   // Native Spaces records omit ordinary about:blank tabs; create them directly.
+  // Lazy, like Zen's own applier: the session never collects a blank tab with a
+  // loaded browser, so it would be missing right after being opened.
   for (const record of tabRecords) {
     const d = record.cleartext.data;
     if (d.url !== "about:blank" || win.document.getElementById(record.id)) continue;
     const context = d.containerGuid ? ZenSpacesSyncModel.contextIdForGuid(d.containerGuid) : 0;
     if (context === null) throw new Error("Unknown container for blank tab");
     const tab = win.gBrowser.addTrustedTab("about:blank", {
-      inBackground: true, skipAnimation: true, skipRoute: true, userContextId: context
+      createLazyBrowser: true, inBackground: true, skipAnimation: true, skipRoute: true, userContextId: context
     });
     tab.id = record.id;
     if (d.workspaceUuid) win.gZenWorkspaces.moveTabToWorkspace(tab, d.workspaceUuid);
