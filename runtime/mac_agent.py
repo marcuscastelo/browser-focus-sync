@@ -132,9 +132,13 @@ def marionette_ready() -> bool:
 
 
 def bridge_ready() -> bool:
+    """A bridge that stopped leaves its last status behind, identity included; only a
+    status rewritten within the bridge's own refresh window counts as installed."""
     try:
         status = json.loads(BRIDGE_STATUS.read_text())
-        return status.get("identity") == twilight_identity()
+        updated = status.get("updatedAt")
+        return (status.get("identity") == twilight_identity() and isinstance(updated, (int, float))
+                and abs(time.time() * 1000 - updated) <= bridge_client.STATUS_MAX_AGE_MS)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return False
 

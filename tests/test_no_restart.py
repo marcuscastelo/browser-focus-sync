@@ -107,6 +107,23 @@ class ReopenOnRequestTests(unittest.TestCase):
             agent.mocks["restart_twilight_with_control"].assert_not_called()
             self.assertFalse(json.loads(m.REOPEN_RESULT.read_text())["restarted"])
 
+    def test_reopens_a_browser_whose_bridge_status_went_stale(self):
+        # The bridge stopped hours ago but left its status file with the current identity.
+        identity, bridge_ready = "100:Thu Oct  8 19:24:38 2026", m.bridge_ready
+        with tempfile.TemporaryDirectory() as tmp, Agent() as agent:
+            status = Path(tmp) / "status.json"
+            with patch.object(m, "bridge_ready", bridge_ready), patch.object(m, "BRIDGE_STATUS", status), \
+                    patch.object(m.time, "time", return_value=1_000_000.0):
+                status.write_text(json.dumps({"identity": identity, "updatedAt": 1_000_000_000 - 20_000_000}))
+                self.assertFalse(m.bridge_ready())
+                status.write_text(json.dumps({"identity": identity, "updatedAt": 1_000_000_000 - 30_000}))
+                self.assertTrue(m.bridge_ready())
+                status.write_text(json.dumps({"identity": identity, "updatedAt": 1_000_000_000 - 20_000_000}))
+                m.REOPEN_REQUEST.write_text("9")
+                m.handle_reopen_request()
+            agent.mocks["restart_twilight_with_control"].assert_called_once()
+            self.assertTrue(json.loads(m.REOPEN_RESULT.read_text())["restarted"])
+
     def test_command_waits_for_the_agent_answer(self):
         with Agent() as agent:
             def agent_loop():
