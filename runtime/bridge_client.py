@@ -285,7 +285,7 @@ def wait_listening(port: int, expected: bool, timeout: float) -> bool:
             return True
         if time.monotonic() >= deadline:
             return False
-        time.sleep(0.25)
+        time.sleep(0.05)
 
 
 def wait_clean(paths: Paths, identity: str, timeout: float) -> bool:

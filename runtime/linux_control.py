@@ -202,10 +202,9 @@ def install_bridge() -> bool:
                 } finally {
                   busy = false;
                   if (win.__twilightControlGeneration === generation) {
-                    win.__twilightControlTimer = win.setTimeout(
-                      update,
-                      desired === "on" ? 250 : 5000
-                    );
+                    // Read the request every 250 ms even while off: a short user (dictation
+                    // pausing media at the start of a recording) waits for this read.
+                    win.__twilightControlTimer = win.setTimeout(update, 250);
                   }
                 }
               };

@@ -139,6 +139,9 @@ It installs the in-process bridge and turns Marionette off. It must report
 success; do not leave the browser in automation mode if setup fails. Browser
 restarts remove the injected bridge. On Linux repeat the explicit bootstrap
 after a normal restart; it will **not** automatically restart your browser.
+After updating the bridge script, swap it into the running browser with
+`.venv/bin/python manage.py reinstall-bridge`; it takes the lease, so it waits for
+a handoff in progress.
 
 On Mac the agent never restarts the browser on its own either:
 - When the browser restarts itself (an update, `about:restart`) after being opened
