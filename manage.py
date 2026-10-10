@@ -124,6 +124,7 @@ def main():
     seed.add_argument("--peer-inventory", required=True, type=Path)
     seed.add_argument("--confirm-backed-up-and-aligned", action="store_true", required=True)
     sub.add_parser("bootstrap-control")
+    sub.add_parser("reinstall-bridge")
     args = parser.parse_args()
     os.umask(0o077)
     cfg = load_config(args.config)
@@ -180,6 +181,26 @@ def main():
             if not release():
                 raise ValueError("CONTROL DID NOT STOP: stop the agent and restart browser normally")
         print("Control bridge ready; Marionette released.")
+    elif args.command == "reinstall-bridge":
+        # A running browser keeps the bridge it got at startup; swap in the current script.
+        cfg.prepare_directories()
+        if args.platform == "mac":
+            import mac_agent as control
+        else:
+            import linux_control as control
+        try:
+            control.LEASE.acquire()
+        except control.bridge_client.BridgeError as error:
+            raise ValueError(f"Cannot take Twilight control ({error.code}): {error}") from error
+        try:
+            installed = control.install_bridge()
+        finally:
+            released = control.LEASE.release()
+        if not installed:
+            raise ValueError("Bridge not reinstalled; the previous one keeps running")
+        if not released:
+            raise ValueError("CONTROL DID NOT STOP: stop the agent and restart browser normally")
+        print("Control bridge reinstalled; Marionette released.")
     return 0
 
 
