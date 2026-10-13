@@ -5,6 +5,8 @@ import argparse
 import json
 import sys
 
+import bridge_client
+
 from marionette_driver.errors import MarionetteException
 from marionette_driver.marionette import Marionette
 
@@ -26,8 +28,7 @@ def main() -> int:
 
     client = Marionette(host="127.0.0.1", port=args.port, socket_timeout=30)
     try:
-        client.start_session()
-        client.set_context(client.CONTEXT_CHROME)
+        bridge_client.start_chrome_session(client)
         result = client.execute_script(
             """
             const { ZenSpacesSyncModel } = ChromeUtils.importESModule(
@@ -69,7 +70,7 @@ def main() -> int:
             """,
             script_args=[ids],
         )
-    except (OSError, MarionetteException) as error:
+    except (OSError, MarionetteException, bridge_client.BridgeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}))
         return 1
     finally:

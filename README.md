@@ -212,6 +212,27 @@ journalctl --user -u browser-focus-sync.service -n 30
 ```
 
 Mac logs: `~/.local/share/browser-focus-sync/agent.log`. Redact logs before sharing.
+
+Chrome control sessions on macOS use Gecko's native `moz:windowless` capability
+and attach to the most recent browser window with `focus: false`. Ordinary
+Marionette session initialization calls `window.focus()` even for read-only
+scripts. This policy covers the bridge installer, structural handoffs and the
+shared client used by browser tools. An explicitly requested focus operation
+inside a script still uses normal focus behavior.
+
+Session metadata (time, caller basename, PID, platform and port; no arguments,
+URLs or scripts) is recorded in
+`~/.local/state/browser-focus-sync/control-sessions.jsonl`, rotating at 1 MB.
+The headless macOS regression is `tests/background_browser.py RUNTIME EXECUTABLE`
+(run with the project's Python environment); it creates and removes its own
+profile and port. It measures native focus calls, checks both clients and
+cleanup after errors. Never run that test against an existing browser profile.
+
+Gecko rejects `moz:windowless` on Linux. Ordinary session startup can also take
+focus on KWin. `focusmanager.testmode` is unsuitable as a replacement: emulated
+activation leaves the internal active window different from the compositor,
+breaking subsequent explicit `window.focus()`. This Linux limitation remains
+unresolved; do not enable that preference in the user's browser as a workaround.
 For a full removal, stop/unload both agents, restart both browsers normally to
 remove the in-process bridges, and restore the three preferences you changed.
 Keep backups/state until you have verified your sessions; removal is deliberately

@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import bridge_client as bc
 
@@ -220,6 +220,7 @@ class FakeMarionette(threading.Thread):
         self.server.listen(1)
         self.port = self.server.getsockname()[1]
         self.commands = []
+        self.parameters = []
 
     def send(self, conn, payload):
         body = json.dumps(payload).encode()
@@ -239,15 +240,27 @@ class FakeMarionette(threading.Thread):
                     header += byte
                 _, message_id, name, params = json.loads(stream.read(int(header[:-1])))
                 self.commands.append(name)
+                self.parameters.append(params)
                 if name == "WebDriver:ExecuteScript" and params["script"] == "boom":
                     self.send(conn, [1, message_id, {"error": "javascript error", "message": "boom"}, None])
+                elif name == "WebDriver:ExecuteScript" and params["script"] == bc.MOST_RECENT_WINDOW_JS:
+                    self.send(conn, [1, message_id, None, {"value": "recent-browser"}])
                 elif name == "WebDriver:ExecuteScript":
-                    self.send(conn, [1, message_id, None, {"value": params["args"][0] * 2}])
+                    self.send(conn, [1, message_id, None, {"value": params["args"][0] * 2 if params["args"] else None}])
+                elif name == "WebDriver:NewSession":
+                    self.send(conn, [1, message_id, None, {"capabilities": params}])
+                elif name == "WebDriver:GetWindowHandles":
+                    self.send(conn, [1, message_id, None, ["browser"]])
                 else:
                     self.send(conn, [1, message_id, None, {}])
 
 
 class MarionetteClientTests(unittest.TestCase):
+    def setUp(self):
+        self.log = patch.object(bc, "session_event")
+        self.log.start()
+        self.addCleanup(self.log.stop)
+
     def test_chrome_session_runs_script_and_deletes_session(self):
         fake = FakeMarionette()
         fake.start()
@@ -259,6 +272,37 @@ class MarionetteClientTests(unittest.TestCase):
         fake.join(2)
         self.assertEqual(fake.commands[:2], ["WebDriver:NewSession", "Marionette:SetContext"])
         self.assertEqual(fake.commands[-1], "WebDriver:DeleteSession")
+
+    def test_mac_session_skips_native_focus_and_attaches_without_focus(self):
+        fake = FakeMarionette()
+        fake.start()
+        with patch.object(bc.platform, "system", return_value="Darwin"):
+            with self.assertRaises(ValueError):
+                with bc.chrome_session(fake.port):
+                    raise ValueError("caller failed")
+        fake.join(2)
+        self.assertEqual(fake.parameters[0], {"moz:windowless": True})
+        self.assertEqual(fake.commands[2:4], ["WebDriver:GetWindowHandles", "WebDriver:SwitchToWindow"])
+        self.assertEqual(fake.parameters[3], {"handle": "browser", "focus": False})
+        self.assertEqual(fake.parameters[6], {"handle": "recent-browser", "focus": False})
+        self.assertEqual(fake.commands[-1], "WebDriver:DeleteSession")
+
+    def test_driver_uses_same_policy_and_refuses_unsupported_background(self):
+        client = Mock(port=2901, CONTEXT_CHROME="chrome", window_handles=["browser"])
+        client.start_session.return_value = {"moz:windowless": True}
+        client.execute_script.return_value = "recent-browser"
+        with patch.object(bc.platform, "system", return_value="Darwin"):
+            bc.start_chrome_session(client)
+            client.start_session.assert_called_once_with({"moz:windowless": True})
+            self.assertEqual(client.switch_to_window.call_count, 2)
+            client.switch_to_window.assert_called_with("recent-browser", focus=False)
+            client.start_session.return_value = {"moz:windowless": False}
+            with self.assertRaises(bc.BridgeError):
+                bc.start_chrome_session(client)
+
+    def test_linux_does_not_send_mac_only_capability(self):
+        with patch.object(bc.platform, "system", return_value="Linux"):
+            self.assertEqual(bc.session_capabilities(), {})
 
 
 if __name__ == "__main__":

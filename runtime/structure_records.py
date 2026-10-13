@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+
+import bridge_client
 from pathlib import Path
 
 from marionette_driver.errors import MarionetteException
@@ -222,8 +224,7 @@ const survivors = (kind, id) => win.gBrowser.tabs.filter(tab =>
 def run_script(script: str, args: list, port: int, timeout: int) -> dict:
     client = Marionette(host="127.0.0.1", port=port, socket_timeout=timeout + 30)
     try:
-        client.start_session()
-        client.set_context(client.CONTEXT_CHROME)
+        bridge_client.start_chrome_session(client)
         client.timeout.script = timeout
         return client.execute_async_script(script, script_args=args)
     finally:
@@ -286,7 +287,7 @@ def main() -> int:
             if not args.payload_file:
                 raise ValueError("--payload-file is required")
             result = run_script(APPLY, [load_payload(Path(args.payload_file))], args.port, 90)
-    except (OSError, ValueError, json.JSONDecodeError, MarionetteException) as error:
+    except (OSError, ValueError, json.JSONDecodeError, MarionetteException, bridge_client.BridgeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}))
         return 1
     print(json.dumps(result, separators=(",", ":")))

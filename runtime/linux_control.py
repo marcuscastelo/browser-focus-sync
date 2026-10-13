@@ -149,8 +149,7 @@ def install_bridge() -> bool:
         return False
     client = Marionette(host="127.0.0.1", port=2828, socket_timeout=30)
     try:
-        client.start_session()
-        client.set_context(client.CONTEXT_CHROME)
+        bridge_client.start_chrome_session(client)
         installed = client.execute_async_script(
             """
               const done = arguments[arguments.length - 1];
@@ -213,7 +212,7 @@ def install_bridge() -> bool:
             script_args=[str(CONTROL_REQUEST), str(BRIDGE_STATUS), identity],
         )
         return bool(installed)
-    except (OSError, MarionetteException):
+    except (OSError, MarionetteException, bridge_client.BridgeError):
         return False
     finally:
         try:

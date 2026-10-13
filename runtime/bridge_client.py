@@ -22,6 +22,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -34,6 +35,12 @@ except ImportError:  # pragma: no cover - exercised on Python 3.9
     tomllib = None  # type: ignore
 
 DEFAULT_PORT = 2828
+MOST_RECENT_WINDOW_JS = """
+const {NavigableManager} = ChromeUtils.importESModule(
+  "chrome://remote/content/shared/NavigableManager.sys.mjs");
+return NavigableManager.getIdForBrowsingContext(
+  Services.wm.getMostRecentBrowserWindow().browsingContext);
+"""
 STATUS_MAX_AGE_MS = 180_000  # the bridge rewrites its status at least every 60 s
 DEFAULT_EXECUTABLES = {
     "mac": "/Applications/Twilight.app/Contents/MacOS/zen",
@@ -482,6 +489,48 @@ def controlled(**options: Any) -> Iterator[Lease]:
 
 # --- minimal Marionette client ---------------------------------------------
 
+def session_event(event: str, port: int) -> None:
+    """Bounded diagnostic metadata; never record scripts, URLs or arguments."""
+    try:
+        directory = Path.home() / ".local/state/browser-focus-sync"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "control-sessions.jsonl"
+        if path.exists() and path.stat().st_size > 1_000_000:
+            path.replace(path.with_suffix(".jsonl.1"))
+        record = {"time": time.time(), "event": event, "pid": os.getpid(),
+                  "caller": Path(sys.argv[0]).name, "port": port,
+                  "system": platform.system()}
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(record) + "\n")
+    except OSError:
+        pass  # diagnostics must not interrupt a handoff
+
+
+def session_capabilities() -> Dict[str, Any]:
+    # Gecko's ordinary NewSession calls window.focus(). On macOS windowless
+    # skips that initialization; explicitly attach without focusing afterwards.
+    # Gecko rejects this capability on Linux.
+    return {"moz:windowless": True} if platform.system() == "Darwin" else {}
+
+
+def start_chrome_session(client: Any) -> None:
+    """Start the marionette_driver client with the same background policy."""
+    session_event("driver-start", client.port)
+    capabilities = session_capabilities()
+    offered = client.start_session(capabilities)
+    client.set_context(client.CONTEXT_CHROME)
+    if capabilities:
+        if not offered.get("moz:windowless"):
+            raise BridgeError("background_session_unavailable", "Gecko did not accept windowless control")
+        handles = client.window_handles
+        if not handles:
+            raise BridgeError("bridge_unavailable", "No chrome window available for control")
+        client.switch_to_window(handles[-1], focus=False)
+        recent = client.execute_script(MOST_RECENT_WINDOW_JS)
+        client.switch_to_window(recent, focus=False)
+
+
 class Marionette:
     """Marionette wire protocol: ``<length>:<json>``, commands ``[0, id, name, params]``."""
 
@@ -530,9 +579,20 @@ def chrome_session(port: int = DEFAULT_PORT, timeout: float = 30.0) -> Iterator[
     client = Marionette(port, timeout)
     started = False
     try:
-        client.command("WebDriver:NewSession", {"capabilities": {}})
+        session_event("start", port)
+        capabilities = session_capabilities()
+        offered = client.command("WebDriver:NewSession", capabilities)
         started = True
         client.command("Marionette:SetContext", {"value": "chrome"})
+        if capabilities:
+            if not offered["capabilities"].get("moz:windowless"):
+                raise BridgeError("background_session_unavailable", "Gecko did not accept windowless control")
+            handles = client.command("WebDriver:GetWindowHandles")
+            if not handles:
+                raise BridgeError("bridge_unavailable", "No chrome window available for control")
+            client.command("WebDriver:SwitchToWindow", {"handle": handles[-1], "focus": False})
+            recent = client.execute(MOST_RECENT_WINDOW_JS)
+            client.command("WebDriver:SwitchToWindow", {"handle": recent, "focus": False})
         yield client
     finally:
         try:
@@ -541,6 +601,7 @@ def chrome_session(port: int = DEFAULT_PORT, timeout: float = 30.0) -> Iterator[
         except (OSError, MarionetteError):
             pass
         client.close()
+        session_event("end", port)
 
 
 def run_chrome_script(script: str, args: Optional[List[Any]] = None, *, asynchronous: bool = False,
