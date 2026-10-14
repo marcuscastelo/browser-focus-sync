@@ -93,7 +93,7 @@ def mac_idle_seconds() -> float:
 
 DESKFLOW_LOG = cfg.get("mac", "deskflow_server_log", "")
 DESKFLOW_SCREEN = str(cfg.get("mac", "deskflow_screen", ""))
-DESKFLOW_SWITCH = re.compile(r'^\[(\S+)\] INFO: switch from "[^"]*" to "([^"]*)"')
+DESKFLOW_SWITCH = re.compile(r'^\[(\S+)\] INFO: (?:switch|jump) from "[^"]*" to "([^"]*)"')
 
 
 def seconds_on_other_screen() -> float | None:
@@ -110,6 +110,8 @@ def seconds_on_other_screen() -> float | None:
     except OSError:
         return None
     for line in reversed(lines):
+        if "entering computer" in line:
+            return None
         match = DESKFLOW_SWITCH.match(line)
         if not match:
             continue
