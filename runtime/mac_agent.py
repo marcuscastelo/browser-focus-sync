@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import bfs_config as cfg
+from bridge_client import mac_command_runs_profile
 
 import bridge_client
 import lz4.block
@@ -239,14 +240,6 @@ def twilight_pid() -> str | None:
                 continue
             return fields[0]
     return None
-
-
-def mac_command_runs_profile(command: str, profile: Path) -> bool:
-    """ps joins arguments with spaces and profile paths contain spaces: compare text."""
-    if " --profile " not in command and " -profile " not in command:
-        return True  # opened from the Dock: the default profile, ours
-    expected = str(profile.expanduser())
-    return f"--profile {expected}" in command or f"-profile {expected}" in command
 
 
 def twilight_running() -> bool:

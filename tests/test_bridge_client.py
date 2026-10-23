@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -189,6 +190,48 @@ class LeaseTests(unittest.TestCase):
         with self.assertRaises(bc.BridgeError) as caught:
             self.lease().acquire()
         self.assertEqual(caught.exception.code, "bridge_unavailable")
+
+
+class IdentityTests(unittest.TestCase):
+    def test_linux_skips_a_second_browser_with_another_profile(self):
+        # 08/10: a disposable Twilight on /tmp became "the browser" and hid the real bridge.
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("Linux /proc only")
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = str(Path(tmp) / "zen-bin")  # argv[0] the fake browsers share
+            profile = Path(tmp) / "ours"
+
+            def browser(*args):
+                # /bin/sh stays alive in the foreground with argv[0] set to the fake path.
+                return subprocess.Popen([fake, "-c", "sleep 30; :", "sh", *args], executable="/bin/sh")
+            other = browser("--profile", str(Path(tmp) / "other"))
+            try:
+                time.sleep(0.3)
+                self.assertIsNone(bc.browser_identity(fake, "Linux", profile))
+                self.assertEqual(bc.browser_identity(fake, "Linux", None).split(":")[0], str(other.pid))
+                ours = browser("--profile", str(profile))
+                try:
+                    time.sleep(0.3)
+                    self.assertEqual(bc.browser_identity(fake, "Linux", profile).split(":")[0], str(ours.pid))
+                finally:
+                    ours.kill()
+            finally:
+                other.kill()
+
+    def test_profile_rules(self):
+        profile = Path("/Users/u/Profiles/x.Default (twilight)")
+        self.assertTrue(bc.runs_other_profile(["zen", "--profile", "/tmp/lab/a"], profile))
+        self.assertFalse(bc.runs_other_profile(["zen", f"--profile={profile}"], profile))
+        self.assertFalse(bc.runs_other_profile(["zen"], profile))
+        self.assertTrue(bc.mac_command_runs_profile("/A/zen --marionette", profile))
+        self.assertTrue(bc.mac_command_runs_profile(f"/A/zen --profile {profile} --marionette", profile))
+        self.assertFalse(bc.mac_command_runs_profile("/A/zen --profile /tmp/lab/a", profile))
+
+    def test_profile_defaults_to_config(self):
+        with patch.object(bc, "load_settings", return_value={"linux": {"profile": "/p/ours"}}), \
+                patch.object(bc, "_linux_identity", return_value="1:2") as linux:
+            bc.browser_identity("/x/zen", "Linux")
+        self.assertEqual(linux.call_args.args[1], Path("/p/ours"))
 
 
 class ConfigTests(unittest.TestCase):
