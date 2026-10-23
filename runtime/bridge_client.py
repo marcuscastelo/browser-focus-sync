@@ -295,6 +295,34 @@ def wait_listening(port: int, expected: bool, timeout: float) -> bool:
         time.sleep(0.05)
 
 
+def start_failure_detail(paths: Paths, port: int, waited: float) -> str:
+    """One line of evidence for a ``start_failed``: what the bridge last reported.
+
+    A past failure cannot be reproduced on the user's browser, so the message itself
+    carries the request seen, the status age and the bridge's own init error."""
+    state = read_status(paths) or {}
+    updated = state.get("updatedAt")
+    age = (f"{int(time.time() * 1000 - updated)}ms"
+           if isinstance(updated, (int, float)) else "absent")
+    fields = [
+        f"at={time.strftime('%Y-%m-%dT%H:%M:%S%z')}",
+        f"waited={waited:g}s",
+        f"port={port}",
+        f"listening={listening(port)}",
+        f"request={read_request(paths)}",
+        f"status_age={age}",
+        f"running={state.get('running')}",
+        f"webdriver={state.get('webdriverActive')}",
+    ]
+    error = state.get("lastError")
+    if isinstance(error, dict):
+        message = str(error.get("message", ""))[:300]
+        fields.append(f"bridge_error={error.get('op')}@{error.get('at')}: {message}")
+    else:
+        fields.append("bridge_error=none")
+    return " ".join(fields)
+
+
 def wait_clean(paths: Paths, identity: str, timeout: float) -> bool:
     """Wait until the bridge reports Marionette and webdriver both off."""
     deadline = time.monotonic() + timeout
@@ -423,8 +451,11 @@ class Lease:
             if read_request(self.paths) == "off":
                 self._owned_mtime = write_request(self.paths, "on")
             if not wait_listening(self.port, True, self.start_timeout):
+                # Read the evidence before _turn_off rewrites the request.
+                detail = start_failure_detail(self.paths, self.port, self.start_timeout)
                 self._turn_off()
-                raise BridgeError("start_failed", "Twilight control bridge did not start Marionette")
+                raise BridgeError("start_failed",
+                                  f"Twilight control bridge did not start Marionette ({detail})")
             return self
         except BaseException:
             self._unlock()

@@ -171,6 +171,7 @@ def install_bridge() -> bool:
               win.__twilightControlGeneration = generation;
               let busy = false;
               let lastStatusKey = "";
+              let lastError = null;
               let lastWriteAt = 0;
               const update = async () => {
                 if (busy) return;
@@ -178,26 +179,36 @@ def install_bridge() -> bool:
                 let desired = "off";
                 try {
                   desired = (await IOUtils.readUTF8(requestPath).catch(() => "off")).trim();
-                  if (desired === "on" && !Marionette.running) {
-                    await Marionette.init();
-                  } else if (desired !== "on" && Marionette.running) {
-                    await Marionette.uninit();
+                  const op = desired === "on" && !Marionette.running ? "init"
+                    : desired !== "on" && Marionette.running ? "uninit" : null;
+                  let opError = null;
+                  if (op) {
+                    try {
+                      await (op === "init" ? Marionette.init() : Marionette.uninit());
+                    } catch (error) {
+                      // Kept in the status file (short: the client ignores files over 4 KiB)
+                      // and quoted by the client on start_failed.
+                      lastError = { op, at: Date.now(), message: String(error && error.message || error).slice(0, 300) };
+                      opError = error;
+                    }
                   }
                   if (desired !== "on") {
                     RecommendedPreferences.restoreAllPreferences();
                   }
                   const now = Date.now();
-                  const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}`;
+                  const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}:${lastError ? lastError.at : ""}`;
                   if (statusKey !== lastStatusKey || now - lastWriteAt >= 60000) {
                     await IOUtils.writeUTF8(statusPath, JSON.stringify({
                       identity,
                       running: Marionette.running,
                       webdriverActive: Marionette.isBrowserAutomationRunning,
                       updatedAt: now,
+                      lastError,
                     }));
                     lastStatusKey = statusKey;
                     lastWriteAt = now;
                   }
+                  if (opError) throw opError;
                 } finally {
                   busy = false;
                   if (win.__twilightControlGeneration === generation) {

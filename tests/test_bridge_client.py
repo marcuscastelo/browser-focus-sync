@@ -136,6 +136,34 @@ class LeaseTests(unittest.TestCase):
         with self.lease():
             pass
 
+    def test_start_failed_carries_the_bridge_evidence(self):
+        # A fresh bridge that never listens and reports its own init error.
+        self.paths.status.write_text(json.dumps({
+            "identity": "123:456", "running": False, "webdriverActive": False,
+            "updatedAt": time.time() * 1000,
+            "lastError": {"op": "init", "at": 1792700000000, "message": "NS_ERROR_FAILURE"},
+        }))
+        with self.assertRaises(bc.BridgeError) as caught:
+            self.lease(start_timeout=0.3).acquire()
+        self.assertEqual(caught.exception.code, "start_failed")
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("Twilight control bridge did not start Marionette ("))
+        for field in ("waited=0.3s", "listening=False", "request=on", "running=False",
+                      "bridge_error=init@1792700000000: NS_ERROR_FAILURE"):
+            self.assertIn(field, message)
+        self.assertEqual(bc.read_request(self.paths), "off")
+        with self.assertRaises(bc.BridgeError) as again:  # lock released, not bridge_busy
+            self.lease(start_timeout=0.1).acquire()
+        self.assertEqual(again.exception.code, "start_failed")
+
+    def test_start_failed_without_bridge_error(self):
+        self.paths.status.write_text(json.dumps({
+            "identity": "123:456", "running": False, "webdriverActive": False,
+            "updatedAt": time.time() * 1000}))
+        detail = bc.start_failure_detail(self.paths, self.port, 1)
+        self.assertIn("bridge_error=none", detail)
+        self.assertIn("request=off", detail)
+
     def test_holder_file_names_who_holds_the_lock(self):
         self.bridge()
         first = self.lease(label="coordinator").acquire()
