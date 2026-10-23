@@ -156,6 +156,16 @@ class LeaseTests(unittest.TestCase):
             self.lease(start_timeout=0.1).acquire()
         self.assertEqual(again.exception.code, "start_failed")
 
+    def test_start_failed_cleans_up_even_if_the_detail_fails(self):
+        self.paths.status.write_text(json.dumps({
+            "identity": "123:456", "running": False, "webdriverActive": False,
+            "updatedAt": time.time() * 1000}))
+        with patch.object(bc, "start_failure_detail", side_effect=ValueError("nan")):
+            with self.assertRaises(bc.BridgeError) as caught:
+                self.lease(start_timeout=0.1).acquire()
+        self.assertIn("detail_error=ValueError", str(caught.exception))
+        self.assertEqual(bc.read_request(self.paths), "off")
+
     def test_start_failed_without_bridge_error(self):
         self.paths.status.write_text(json.dumps({
             "identity": "123:456", "running": False, "webdriverActive": False,

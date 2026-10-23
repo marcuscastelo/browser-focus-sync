@@ -204,7 +204,7 @@ def install_bridge() -> bool:
                     RecommendedPreferences.restoreAllPreferences();
                   }
                   const now = Date.now();
-                  const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}:${lastError ? lastError.at : ""}`;
+                  const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}:${lastError ? lastError.op + lastError.message : ""}`;
                   if (statusKey !== lastStatusKey || now - lastWriteAt >= 60000) {
                     await IOUtils.writeUTF8(statusPath, JSON.stringify({
                       identity,

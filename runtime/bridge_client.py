@@ -316,7 +316,7 @@ def start_failure_detail(paths: Paths, port: int, waited: float) -> str:
     ]
     error = state.get("lastError")
     if isinstance(error, dict):
-        message = str(error.get("message", ""))[:300]
+        message = " ".join(str(error.get("message", "")).split())[:300]
         fields.append(f"bridge_error={error.get('op')}@{error.get('at')}: {message}")
     else:
         fields.append("bridge_error=none")
@@ -452,7 +452,10 @@ class Lease:
                 self._owned_mtime = write_request(self.paths, "on")
             if not wait_listening(self.port, True, self.start_timeout):
                 # Read the evidence before _turn_off rewrites the request.
-                detail = start_failure_detail(self.paths, self.port, self.start_timeout)
+                try:
+                    detail = start_failure_detail(self.paths, self.port, self.start_timeout)
+                except Exception as error:  # evidence must never skip the cleanup below
+                    detail = f"detail_error={type(error).__name__}"
                 self._turn_off()
                 raise BridgeError("start_failed",
                                   f"Twilight control bridge did not start Marionette ({detail})")
