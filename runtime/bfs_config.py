@@ -38,24 +38,8 @@ def profile(platform: str) -> Path:
     return result
 
 
-def runs_other_profile(arguments: list[str], configured: Path | None) -> bool:
-    """Whether a browser command line explicitly names a profile other than ours.
-
-    A second Twilight (a disposable test profile, another channel) shares the
-    executable; taking it for ours hid the real bridge. A browser started
-    without --profile (the macOS Dock) is still ours.
-    """
-    if configured is None:
-        return False
-    named = None
-    for index, argument in enumerate(arguments):
-        if argument in ("--profile", "-profile") and index + 1 < len(arguments):
-            named = arguments[index + 1]
-        elif argument.startswith("--profile="):
-            named = argument.split("=", 1)[1]
-    if named is None:
-        return False
-    return Path(named).expanduser().resolve() != configured.expanduser().resolve()
+# One rule for every reader of the browser identity, kept with the bridge client.
+from bridge_client import runs_other_profile  # noqa: E402,F401
 
 
 def configured_profile(platform: str) -> Path | None:
