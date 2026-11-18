@@ -35,6 +35,14 @@ def read_session(profile: Path) -> dict:
     return json.loads(lz4.block.decompress(payload[8:]))
 
 
+
+def material_tab_ids(session: dict) -> set[str]:
+    """Match Zen's record-material flags; folder placeholders are host-local."""
+    return {tab["zenSyncId"] for tab in session.get("tabs", [])
+            if tab.get("zenSyncId") and not tab.get("zenIsEmpty")
+            and not tab.get("zenIsGlance") and not tab.get("zenLiveFolderItemId")}
+
+
 def current_url(tab: dict) -> str | None:
     entries = tab.get("entries") or []
     if not entries:

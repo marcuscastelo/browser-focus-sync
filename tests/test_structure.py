@@ -278,3 +278,23 @@ class MacFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaterialInventories(unittest.TestCase):
+    def test_protocol_two_excludes_host_local_placeholders_but_preserves_legacy(self):
+        import lz4.block
+        data = {'tabs': [
+            {'zenSyncId': 'real'}, {'zenSyncId': 'blank', 'entries': []},
+            {'zenSyncId': 'placeholder', 'zenIsEmpty': True},
+            {'zenSyncId': 'glance', 'zenIsGlance': True},
+            {'zenSyncId': 'live-folder', 'zenLiveFolderItemId': 'folder'},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory)
+            (profile / 'zen-sessions.jsonlz4').write_bytes(b'mozLz40\0' + lz4.block.compress(json.dumps(data).encode()))
+            with patch.object(c.cfg, 'MULTIPARTICIPANT', True):
+                self.assertEqual(lc.stored_tab_ids(profile), {'real', 'blank'})
+                self.assertEqual(m.tab_ids(profile), {'real', 'blank'})
+            with patch.object(c.cfg, 'MULTIPARTICIPANT', False):
+                self.assertEqual(len(lc.stored_tab_ids(profile)), 5)
+                self.assertEqual(len(m.tab_ids(profile)), 5)

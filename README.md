@@ -490,3 +490,10 @@ apply state, and archives the previous peer queue/reply privately before replaci
 it. It does not import data or waive alignment, and never runs automatically.
 Keep another participant online to flush pending coordinator edits before comparing
 snapshots; an unacknowledged local change is not an aligned recovery baseline.
+
+Protocol-2 tab inventories exclude Zen's host-local folder placeholders, Glance
+and live-folder virtual items, using the same material flags as Zen's model.
+Regular blank tabs remain material and use the existing blank-tab exporter.
+Legacy protocol-1 inventories keep their previous behavior. During the explicit
+initial alignment, export material blank tabs as well as projected records; do
+not copy or compare host-local placeholder IDs as shared user tabs.

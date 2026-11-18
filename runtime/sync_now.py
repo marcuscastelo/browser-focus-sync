@@ -45,7 +45,7 @@ def main() -> int:
         result = client.execute_async_script(
             """
               const done = arguments[arguments.length - 1];
-              const [reason, onlyIfSpacesPending, inspect, maxTombstones, allowedTombstones] = arguments;
+              const [reason, onlyIfSpacesPending, inspect, maxTombstones, allowedTombstones, multiparticipant] = arguments;
               const accountConfigPrefs = [
                 "identity.fxaccounts.remote.root",
                 "identity.fxaccounts.auth.uri",
@@ -105,6 +105,7 @@ def main() -> int:
                   ok: true,
                   ...counts(),
                   tabIds: (sidebar.tabs || [])
+                    .filter(tab => !multiparticipant || (!tab.zenIsEmpty && !tab.zenIsGlance && !tab.zenLiveFolderItemId))
                     .map(tab => tab.zenSyncId)
                     .filter(Boolean),
                   tombstoneIds: Object.keys(changes).filter(
@@ -183,6 +184,7 @@ def main() -> int:
                 args.inspect,
                 args.max_tombstones,
                 allowed_tombstones,
+                cfg.MULTIPARTICIPANT,
             ],
         )
     except (OSError, MarionetteException, bridge_client.BridgeError) as error:
