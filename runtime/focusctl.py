@@ -16,7 +16,7 @@ This is the coordinator's protocol client: it does not open URLs or touch the br
   status          read the coordinator state; no side effects
   mac-active      report the Mac as active: starts a handoff (sent by mac_agent over SSH)
   base64:PAYLOAD  URL-safe base64 of a JSON request (sent by mac_agent)
-  -               read the request from stdin
+  -               read the request from stdin (including protocol 2 participant JSON)
 
 Exit status: 0 when the reply has "ok": true, 1 otherwise, 2 on a usage error."""
 

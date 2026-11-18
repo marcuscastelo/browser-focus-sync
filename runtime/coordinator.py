@@ -216,7 +216,8 @@ class Coordinator:
             response = await handler()
         finally:
             self.control_scope -= 1
-        if not await self.release_linux_control():
+            clean = await self.release_linux_control()
+        if not clean:
             print("Linux control was not released cleanly after the handoff", flush=True)
             return {"ok": False, "error": "failed to release Linux browser control"}
         return response
@@ -571,6 +572,134 @@ class Coordinator:
         }
 
 
+class ParticipantCoordinator(Coordinator):
+    """One serialized browser writer, durable fanout and explicit peer ACKs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replica_file = STATE_DIR / "participants.json"
+        self.intent_file = STATE_DIR / "participant-apply-intent.json"
+        self.replicas = json.loads(self.replica_file.read_text()) if self.replica_file.exists() else {}
+
+    def persist_replicas(self) -> None:
+        temporary = self.replica_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.replicas))
+        temporary.replace(self.replica_file)
+
+    def fanout(self, source: str, message: dict) -> None:
+        for participant, peer in self.replicas.items():
+            if participant != source:
+                peer["queue"].append(message)
+
+    async def participant_event(self, message: dict) -> dict:
+        async with self.lock:
+            async def operation():
+                return await self.exchange(message)
+            return await self.handoff_scope(operation)
+
+    async def exchange(self, message: dict) -> dict:
+        participant = message.get("participantId")
+        if participant not in {"polaris", "workstation"} or message.get("protocol") != 2:
+            return {"ok": False, "error": "unknown participant or protocol"}
+        if self.intent_file.exists():
+            return {"ok": False, "error": "uncertain application: reconcile intent and baselines offline"}
+        if message.get("nativeSyncRequired"):
+            return {"ok": False, "error": "native sync is disabled in protocol 2"}
+        peer = self.replicas.get(participant)
+        event = message.get("event")
+        if event == "participant-enroll":
+            baseline = self.read_linux_baseline()
+            if peer is not None or baseline is None:
+                return {"ok": False, "error": "existing participant or missing hub baseline"}
+            if sorted(message.get("tabIds", [])) != sorted(baseline["tabIds"]) or message.get("records") != baseline.get("records"):
+                return {"ok": False, "error": "inventories and record digests must be aligned"}
+            self.replicas[participant] = {"queue": [], "last": None, "reply": None,
+                                          "tabIds": baseline["tabIds"], "records": baseline["records"]}
+            self.persist_replicas()
+            return {"ok": True}
+        if peer is None:
+            return {"ok": False, "error": "explicit enrollment required"}
+        if event == "participant-ack":
+            if peer["reply"] is None or message.get("requestId") != peer["last"]:
+                return {"ok": False, "error": "stale ACK"}
+            acknowledged = structure.valid_digests(message.get("baselineRecords"))
+            if acknowledged is None or sorted(message.get("tabIds", [])) != peer["tabIds"]:
+                return {"ok": False, "error": "ACK inventory mismatch"}
+            peer["records"] = acknowledged
+            peer["acked"] = True
+            peer["queue"] = peer["queue"][peer["reply"]["count"]:]
+            peer["reply"]["count"] = 0
+            self.persist_replicas()
+            return {"ok": True}
+        request_id = message.get("requestId")
+        if event != "participant-exchange" or not isinstance(request_id, str) or not request_id:
+            return {"ok": False, "error": "invalid exchange"}
+        if request_id == peer["last"]:
+            if message != peer["request"]:
+                return {"ok": False, "error": "request ID reused with different content"}
+            return peer["reply"]
+        if peer["reply"] and not peer.get("acked"):
+            return {"ok": False, "error": "ACK required before next exchange"}
+        closed = string_list(message, "closedTabIds")
+        opened = object_list(message, "openedTabRecords")
+        records = object_list(message, "structureRecords")
+        deleted = string_list(message, "deletedStructureIds")
+        deletable = {key for key, value in peer["records"].items()
+                     if value[0] in structure.DELETABLE_KINDS}
+        if not set(closed) <= set(peer["tabIds"]) or not set(deleted) <= deletable:
+            return {"ok": False, "error": "deletion outside participant baseline"}
+        if not message.get("sameBrowser", False) and (closed or deleted):
+            return {"ok": False, "error": "identity change cannot authorize deletions"}
+        hub_identity = self.linux_twilight_identity()
+        local = await self.linux_outgoing()
+        if local is None or hub_identity is None:
+            return {"ok": False, "error": "hub baseline/export unavailable"}
+        # Persist intent BEFORE touching the browser. Interrupted/failed applies
+        # require explicit reconciliation, rather than replaying inferred closes.
+        self.intent_file.write_text(json.dumps(message))
+        report = await self.apply_mac_changes(closed, opened, records, deleted)
+        if report is None or report.get("failed") or report.get("remaining"):
+            return {"ok": False, "error": "apply failed; intent retained"}
+        if self.control_held:
+            self.control_held = False
+            if not await asyncio.to_thread(linux_control.release):
+                return {"ok": False, "error": "control cleanup failed; intent retained"}
+        self.fanout("sirius", local.message())
+        self.fanout(participant, {"closedTabIds": closed, "openedTabRecords": opened,
+                                  "structureRecords": records, "deletedStructureIds": deleted})
+        if hub_identity != self.linux_twilight_identity():
+            return {"ok": False, "error": "hub identity changed; intent retained"}
+        hub_records = structure.received(local.records, report, opened + records, closed)
+        hub_ids = (local.tab_ids - set(closed)) | structure.record_ids(opened)
+        if not await self.save_linux_active_baseline(hub_ids, hub_records, None):
+            return {"ok": False, "error": "baseline commit failed; intent retained"}
+        # Later serialized edits win over queued older edits of the same record.
+        decided = set(closed) | structure.record_ids(opened + records) | set(deleted)
+        deliveries = []
+        for queued in peer["queue"]:
+            deliveries.append({
+                "closedTabIds": [x for x in queued.get("closedTabIds", []) if x not in decided],
+                "openedTabRecords": [x for x in queued.get("openedTabRecords", []) if not structure.record_ids([x]) & decided],
+                "structureRecords": [x for x in queued.get("structureRecords", []) if not structure.record_ids([x]) & decided],
+                "deletedStructureIds": [x for x in queued.get("deletedStructureIds", []) if x not in decided],
+            })
+        ids = (set(peer["tabIds"]) - set(closed)) | structure.record_ids(opened)
+        digests = dict(peer["records"])
+        for delivery in deliveries:
+            ids = (ids - set(delivery["closedTabIds"])) | structure.record_ids(delivery["openedTabRecords"])
+        # The peer sends the exact acknowledged digests on its next request;
+        # structure deletion authority is limited to IDs it explicitly observed.
+        observed = structure.valid_digests(message.get("baselineRecords"))
+        if observed is not None:
+            digests = observed
+        peer.update(tabIds=sorted(ids), records=digests, last=request_id, request=message, acked=False,
+                    reply={"ok": True, "requestId": request_id, "deliveries": deliveries,
+                           "count": len(peer["queue"])})
+        self.persist_replicas()
+        self.intent_file.unlink()
+        return peer["reply"]
+
+
 async def idle_loop(coordinator: Coordinator) -> None:
     while True:
         process = await asyncio.create_subprocess_exec(
@@ -632,15 +761,24 @@ async def client_handler(
             deleted_structure_ids = []
             native_sync_required = False
             handoff_id = None
-        response = await coordinator.handle_event(
-            event,
-            closed_tab_ids,
-            opened_tab_records,
-            native_sync_required,
-            handoff_id,
-            structure_records,
-            deleted_structure_ids,
-        )
+        if isinstance(coordinator, ParticipantCoordinator):
+            if not payload.startswith("{"):
+                message = {"event": event}
+            if event == "status":
+                response = {"ok": True, "protocol": 2, "participants": list(coordinator.replicas),
+                            "blocked": coordinator.intent_file.exists()}
+            else:
+                response = await coordinator.participant_event(message)
+        else:
+            response = await coordinator.handle_event(
+                event,
+                closed_tab_ids,
+                opened_tab_records,
+                native_sync_required,
+                handoff_id,
+                structure_records,
+                deleted_structure_ids,
+            )
     except Exception as error:
         response = {"ok": False, "error": str(error)}
     writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
@@ -662,7 +800,15 @@ async def start_server(coordinator: Coordinator, path: Path) -> asyncio.Abstract
 
 async def main() -> None:
     cfg.prepare_directories()
-    coordinator = Coordinator()
+    if cfg.MULTIPARTICIPANT:
+        cfg.validate_participant_config()
+        if cfg.PARTICIPANT_ID != "sirius":
+            raise ValueError("only sirius runs the coordinator")
+    profile_lock = cfg.lock_profile_daemon("linux")
+    coordinator = ParticipantCoordinator() if cfg.MULTIPARTICIPANT else Coordinator()
+    import fcntl
+    daemon_lock = (STATE_DIR / "coordinator-daemon.lock").open("a")
+    fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     if SOCKET.exists():
         SOCKET.unlink()
     server = await start_server(coordinator, SOCKET)
@@ -670,7 +816,10 @@ async def main() -> None:
     # browser restarted. Existing baselines survive process identity changes.
     coordinator.save_state()
     async with server:
-        await asyncio.gather(server.serve_forever(), idle_loop(coordinator))
+        if cfg.MULTIPARTICIPANT:
+            await server.serve_forever()
+        else:
+            await asyncio.gather(server.serve_forever(), idle_loop(coordinator))
 
 
 if __name__ == "__main__":

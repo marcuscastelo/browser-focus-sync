@@ -143,11 +143,11 @@ def request_control(enabled: bool) -> None:
     temporary.replace(CONTROL_REQUEST)
 
 
-def install_bridge() -> bool:
+def install_bridge(port: int = 2828) -> bool:
     identity = twilight_identity()
     if identity is None or not marionette_ready():
         return False
-    client = Marionette(host="127.0.0.1", port=2828, socket_timeout=30)
+    client = Marionette(host="127.0.0.1", port=port, socket_timeout=30)
     try:
         bridge_client.start_chrome_session(client)
         installed = client.execute_async_script(
@@ -156,9 +156,6 @@ def install_bridge() -> bool:
               const [requestPath, statusPath, identity] = arguments;
               const { Marionette } = ChromeUtils.importESModule(
                 "chrome://remote/content/components/Marionette.sys.mjs"
-              );
-              const { RecommendedPreferences } = ChromeUtils.importESModule(
-                "chrome://remote/content/shared/RecommendedPreferences.sys.mjs"
               );
               const win = Services.wm.getMostRecentBrowserWindow();
               if (!win) {
@@ -191,9 +188,6 @@ def install_bridge() -> bool:
                       lastError = { op, at: Date.now(), message: String(error && error.message || error).slice(0, 300) };
                       opError = error;
                     }
-                  }
-                  if (desired !== "on") {
-                    RecommendedPreferences.restoreAllPreferences();
                   }
                   const now = Date.now();
                   const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}:${lastError ? lastError.op + lastError.message : ""}`;
