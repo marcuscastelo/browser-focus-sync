@@ -491,9 +491,31 @@ it. It does not import data or waive alignment, and never runs automatically.
 Keep another participant online to flush pending coordinator edits before comparing
 snapshots; an unacknowledged local change is not an aligned recovery baseline.
 
-Protocol-2 tab inventories exclude Zen's host-local folder placeholders, Glance
-and live-folder virtual items, using the same material flags as Zen's model.
-Regular blank tabs remain material and use the existing blank-tab exporter.
-Legacy protocol-1 inventories keep their previous behavior. During the explicit
-initial alignment, export material blank tabs as well as projected records; do
-not copy or compare host-local placeholder IDs as shared user tabs.
+Protocol-2 tab inventories use Zen's projected page identities: native folder
+placeholders, Glance, live-folder virtual items and empty surfaces without a page
+identity remain local. They are preserved, never inferred as shared closures.
+Their IDs differ between hosts and current browser versions, so comparing them
+as shared pages would create false closures and block enrollment. Legacy
+protocol-1 inventories and its blank-tab exporter keep their previous behavior.
+Initial alignment compares projected IDs and digests, never these local UI IDs.
+
+Quiet protocol-2 polls compare stored fingerprints and IDs and exchange empty
+ACKs without creating a browser-control session. Empty batches are not fanned
+out. Incoming mutations or a changed local snapshot still use the same lease and
+live exporter. A fingerprint changed during collection is never cached as
+acknowledged, so later local edits remain pending for the next cycle.
+
+The quiet change detector observes Zen's saved session file; native UI saves are
+asynchronous. The disposable transport test explicitly flushes the native
+snapshot after mutations, so its bounded cycles test replication rather than
+the browser's save timer. Changes made while a request is offline remain pending
+even if the saved file has not caught up yet; receive-side live comparisons keep
+them protected.
+
+Protocol-2 record digests omit ordinary fetched tab favicons (the native applier
+keeps a loaded page's cache) while retaining static user icons. Exported records
+still carry the favicon for best-effort rendering. Parent child-order records
+include only IDs that have native projections, so local empty surfaces do not
+make otherwise identical shared trees appear different across browser versions.
+Workspace/folder icons, page identity, pinning, placement and shared order remain
+part of the digest. Protocol-1 records and digests are unchanged.

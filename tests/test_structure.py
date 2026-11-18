@@ -46,7 +46,7 @@ class FingerprintTests(unittest.TestCase):
 
     def test_selection_scroll_and_collection_time_do_not(self):
         self.assertFalse(self.changed(lambda d: d.update(lastCollected=2)))
-        self.assertFalse(self.changed(lambda d: d["tabs"][2].update(selected=False, scroll={"y": 9}, image="x")))
+        self.assertFalse(self.changed(lambda d: d["tabs"][2].update(selected=False, scroll={"y": 9})))
 
 
 class PlanTests(unittest.TestCase):
@@ -284,7 +284,8 @@ class MaterialInventories(unittest.TestCase):
     def test_protocol_two_excludes_host_local_placeholders_but_preserves_legacy(self):
         import lz4.block
         data = {'tabs': [
-            {'zenSyncId': 'real'}, {'zenSyncId': 'blank', 'entries': []},
+            {'zenSyncId': 'real', 'entries': [{'url': 'https://page.invalid/'}]},
+            {'zenSyncId': 'blank', 'entries': []},
             {'zenSyncId': 'placeholder', 'zenIsEmpty': True},
             {'zenSyncId': 'glance', 'zenIsGlance': True},
             {'zenSyncId': 'live-folder', 'zenLiveFolderItemId': 'folder'},
@@ -293,8 +294,51 @@ class MaterialInventories(unittest.TestCase):
             profile = Path(directory)
             (profile / 'zen-sessions.jsonlz4').write_bytes(b'mozLz40\0' + lz4.block.compress(json.dumps(data).encode()))
             with patch.object(c.cfg, 'MULTIPARTICIPANT', True):
-                self.assertEqual(lc.stored_tab_ids(profile), {'real', 'blank'})
-                self.assertEqual(m.tab_ids(profile), {'real', 'blank'})
+                self.assertEqual(lc.stored_tab_ids(profile), {'real'})
+                self.assertEqual(m.tab_ids(profile), {'real'})
             with patch.object(c.cfg, 'MULTIPARTICIPANT', False):
                 self.assertEqual(len(lc.stored_tab_ids(profile)), 5)
                 self.assertEqual(len(m.tab_ids(profile)), 5)
+
+
+class ProjectionFingerprint(unittest.TestCase):
+    def test_native_identity_inputs_all_invalidate_the_cache(self):
+        base = {'tabs': [{'zenSyncId': 't', 'pinned': True,
+                         'entries': [{'url': 'https://live.invalid/', 'title': 'Live'}],
+                         '_zenPinnedInitialState': {'entry': {'url': 'https://pin.invalid/', 'title': 'Pin'}, 'image': 'https://pin.invalid/icon'},
+                         'image': 'https://live.invalid/icon', 'zenHasStaticIcon': False}]}
+        original = s.fingerprint(base)
+        variants = []
+        for field, value in [('url', 'https://changed.invalid/'), ('title', 'Changed')]:
+            changed = copy.deepcopy(base)
+            changed['tabs'][0]['_zenPinnedInitialState']['entry'][field] = value
+            variants.append(changed)
+        changed = copy.deepcopy(base); changed['tabs'][0]['image'] = 'https://other.invalid/icon'; variants.append(changed)
+        changed = copy.deepcopy(base); changed['tabs'][0]['zenHasStaticIcon'] = True; variants.append(changed)
+        changed = copy.deepcopy(base); changed['tabs'][0]['entries'][0]['title'] = 'Changed live'; variants.append(changed)
+        for changed in variants:
+            self.assertNotEqual(s.fingerprint(changed), original)
+
+
+class TransportProjection(unittest.TestCase):
+    def test_protocol_two_normalizes_local_views_only(self):
+        import shutil, subprocess
+        if not shutil.which('node'):
+            self.skipTest('node unavailable')
+        prefix = """
+const records=new Map([["s",{kind:"space",data:{children:["t","local-empty"]}}],
+ ["t",{kind:"tab",data:{url:"https://page.invalid",icon:"https://first.invalid/icon",hasStaticIcon:false}}]]);
+const model={projections:()=>records,projectRecord:id=>records.get(id)};
+const ChromeUtils={importESModule:path=>path.includes("ZenSpacesSyncModel")?{ZenSpacesSyncModel:model,recordDigest:(kind,data)=>JSON.stringify([kind,data])}:path.includes("ZenSessionManager")?{ZenSessionStore:{}}:{SessionSaver:{}}};
+const Services={wm:{getMostRecentWindow:()=>({})}};
+"""
+        body = """
+records.get("t").data.hasStaticIcon=false;records.get("t").data.icon="https://first.invalid/icon";
+const before=digests();records.get("t").data.icon="https://different.invalid/icon";const after=digests();
+records.get("t").data.hasStaticIcon=true;const pinned=digests();records.get("t").data.icon="https://static.invalid/icon";
+return {sameDynamic:before.t[1]===after.t[1],sameStatic:pinned.t[1]===digests().t[1],children:exportRecord("s").cleartext.data.children};
+"""
+        code = prefix + 'const f=new Function(' + json.dumps(sr.PRELUDE + body) + ');console.log(JSON.stringify({legacy:f(false,()=>{}),multi:f(true,()=>{})}));'
+        result = json.loads(subprocess.run(['node', '-e', code], check=True, capture_output=True, text=True).stdout)
+        self.assertEqual(result['multi'], {'sameDynamic': True, 'sameStatic': False, 'children': ['t']})
+        self.assertEqual(result['legacy'], {'sameDynamic': False, 'sameStatic': False, 'children': ['t', 'local-empty']})

@@ -135,6 +135,17 @@ class Participants(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def test_noop_does_not_apply_or_queue_empty_batches(self):
+        self.local_delta.fingerprint = 'steady'
+        result = await self.exchange('polaris', 'quiet')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['deliveries'], [])
+        self.hub.apply_mac_changes.assert_not_awaited()
+        self.assertEqual(self.hub.replicas['workstation']['queue'], [])
+        self.assertEqual(self.hub.save_linux_active_baseline.call_args.args[2], 'steady')
+
+
+
 class ParticipantAgent(unittest.TestCase):
     def setUp(self):
         import mac_agent as m
@@ -278,3 +289,34 @@ class ParticipantAgent(unittest.TestCase):
         with patch.object(self.m, 'participant_rpc') as rpc:
             self.assertFalse(self.m.participant_cycle(enroll=True, replacing=True))
             rpc.assert_not_called()
+
+    def test_quiet_poll_never_acquires_browser_control(self):
+        (self.root / 'active-baseline.json').write_text(json.dumps({
+            'identity': 'new', 'tabIds': ['added'], 'records': {'f': ['folder', 'd']}, 'fingerprint': 'steady'}))
+        def reply(message):
+            if message['event'] == 'participant-ack':
+                return {'ok': True}
+            return {'ok': True, 'requestId': message['requestId'], 'deliveries': []}
+        with patch.object(self.m, 'fingerprint', return_value='steady'), \
+             patch.object(self.m, 'tab_ids', return_value={'added'}), \
+             patch.object(self.m, 'participant_rpc', side_effect=reply), \
+             patch.object(self.m, 'ensure_control') as acquire, \
+             patch.object(self.m, 'structure_changes') as collect, \
+             patch.object(self.m, 'apply_changes') as apply, \
+             patch.object(self.m, 'save_active_baseline', return_value=True) as save:
+            self.assertTrue(self.m.participant_cycle())
+            acquire.assert_not_called()
+            collect.assert_not_called()
+            apply.assert_not_called()
+            self.assertEqual(save.call_args.kwargs['stored_fingerprint'], 'steady')
+
+    def test_file_save_during_collection_is_not_cached_as_acknowledged(self):
+        def reply(message):
+            if message['event'] == 'participant-ack':
+                return {'ok': True}
+            return {'ok': True, 'requestId': message['requestId'], 'deliveries': []}
+        with patch.object(self.m, 'fingerprint', side_effect=['before', 'newer-save']), \
+             patch.object(self.m, 'participant_rpc', side_effect=reply), \
+             patch.object(self.m, 'save_active_baseline', return_value=True) as save:
+            self.assertTrue(self.m.participant_cycle())
+            self.assertIsNone(save.call_args.kwargs['stored_fingerprint'])

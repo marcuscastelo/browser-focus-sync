@@ -94,7 +94,7 @@ def stored_tab_ids(profile: Path | None = None) -> set[str]:
     payload = (profile / "zen-sessions.jsonlz4").read_bytes()
     data = json.loads(lz4.block.decompress(payload[8:]))
     if cfg.MULTIPARTICIPANT:
-        return structure.material_tab_ids(data)
+        return structure.shared_tab_ids(data)
     return {tab["zenSyncId"] for tab in data.get("tabs", []) if tab.get("zenSyncId")}
 
 

@@ -104,10 +104,10 @@ def main() -> int:
                 done({
                   ok: true,
                   ...counts(),
-                  tabIds: (sidebar.tabs || [])
-                    .filter(tab => !multiparticipant || (!tab.zenIsEmpty && !tab.zenIsGlance && !tab.zenLiveFolderItemId))
-                    .map(tab => tab.zenSyncId)
-                    .filter(Boolean),
+                  tabIds: multiparticipant
+                    ? [...ZenSpacesSyncModel.projections()]
+                        .filter(([, record]) => record.kind === "tab").map(([id]) => id)
+                    : (sidebar.tabs || []).map(tab => tab.zenSyncId).filter(Boolean),
                   tombstoneIds: Object.keys(changes).filter(
                     id => !ZenSpacesSyncModel.projectRecord(id)
                   ),

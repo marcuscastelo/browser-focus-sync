@@ -277,7 +277,7 @@ def tab_ids(profile: Path) -> set[str]:
     payload = (profile / "zen-sessions.jsonlz4").read_bytes()
     data = json.loads(lz4.block.decompress(payload[8:]))
     if cfg.MULTIPARTICIPANT:
-        return structure.material_tab_ids(data)
+        return structure.shared_tab_ids(data)
     return {tab["zenSyncId"] for tab in data.get("tabs", []) if tab.get("zenSyncId")}
 
 
@@ -1013,31 +1013,46 @@ def participant_cycle(*, enroll: bool = False, replacing: bool = False) -> bool:
         base_records = structure.valid_digests(baseline.get("records"))
         if base_records is None:
             raise ValueError("explicit aligned baseline with digests required")
-        if not ensure_control():
-            return False
-        try:
-            current = live_tab_ids()
-            if current is None:
+        same_browser = baseline.get("identity") == twilight_identity()
+        profile = twilight_profile()
+        snapshot_fingerprint = fingerprint(profile)
+        unchanged = (not enroll and same_browser and snapshot_fingerprint is not None
+                     and snapshot_fingerprint == baseline.get("fingerprint"))
+        current = tab_ids(profile) if unchanged else None
+        unchanged = unchanged and current == set(baseline["tabIds"])
+        if unchanged:
+            tabs, records, deleted, observed = [], [], [], base_records
+        else:
+            if not ensure_control():
                 return False
-            same_browser = baseline.get("identity") == twilight_identity()
-            opened = current - set(baseline["tabIds"])
-            tabs = export_tab_records(opened)
-            changes = structure_changes(base_records, same_browser=same_browser, skip_ids=opened)
-            if tabs is None or changes is None:
+            try:
+                current = live_tab_ids()
+                if current is None:
+                    return False
+                same_browser = baseline.get("identity") == twilight_identity()
+                opened = current - set(baseline["tabIds"])
+                tabs = export_tab_records(opened)
+                changes = structure_changes(base_records, same_browser=same_browser, skip_ids=opened)
+                if tabs is None or changes is None:
+                    return False
+                records, deleted, observed = changes
+                collected_fingerprint = fingerprint(profile)
+                # Only cache a file fingerprint that stayed stable across the
+                # live collection; a newer save must be exported next cycle.
+                if collected_fingerprint != snapshot_fingerprint:
+                    snapshot_fingerprint = None
+            finally:
+                clean = release_control()
+            if not clean:
                 return False
-            records, deleted, observed = changes
-            message = {"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
-                       "event": "participant-exchange", "requestId": str(time.time_ns()),
-                       "sameBrowser": same_browser, "baselineRecords": base_records,
-                       "closedTabIds": sorted(set(baseline["tabIds"]) - current) if same_browser else [],
-                       "openedTabRecords": tabs, "structureRecords": records,
-                       "deletedStructureIds": deleted}
-            pending = {"message": message, "tabIds": sorted(current), "records": observed,
-                       "identity": twilight_identity()}
-        finally:
-            clean = release_control()
-        if not clean:
-            return False
+        message = {"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
+                   "event": "participant-exchange", "requestId": str(time.time_ns()),
+                   "sameBrowser": same_browser, "baselineRecords": base_records,
+                   "closedTabIds": sorted(set(baseline["tabIds"]) - current) if same_browser else [],
+                   "openedTabRecords": tabs, "structureRecords": records,
+                   "deletedStructureIds": deleted}
+        pending = {"message": message, "tabIds": sorted(current), "records": observed,
+                   "identity": twilight_identity(), "fingerprint": snapshot_fingerprint}
         if enroll:
             if not same_browser or current != set(baseline["tabIds"]) or observed != base_records:
                 return False
@@ -1055,52 +1070,57 @@ def participant_cycle(*, enroll: bool = False, replacing: bool = False) -> bool:
         response = participant_rpc(message)
         if not response or not response.get("ok") or response.get("requestId") != message["requestId"]:
             return False
-        if not ensure_control():
-            return False
         ids = set(pending["tabIds"])
         records = pending["records"]
-        try:
-            # The browser may have changed while this exact request was offline.
-            # Keep later local edits pending instead of overwriting them with an
-            # older queued delivery. ACK the logical delivery, then export those
-            # retained differences on the next cycle.
-            if pending["identity"] != twilight_identity():
+        has_deliveries = any(any(delivery.get(key) for key in (
+            "closedTabIds", "openedTabRecords", "structureRecords", "deletedStructureIds", "nativeSyncRequired"
+        )) for delivery in response["deliveries"])
+        if has_deliveries:
+            if not ensure_control():
                 return False
-            current_ids = live_tab_ids()
-            changes_now = structure_changes(records, same_browser=True, skip_ids=set())
-            if current_ids is None or changes_now is None:
+            try:
+                # The browser may have changed while this exact request was offline.
+                # Keep later local edits pending instead of overwriting them with an
+                # older queued delivery. ACK the logical delivery, then export those
+                # retained differences on the next cycle.
+                if pending["identity"] != twilight_identity():
+                    return False
+                current_ids = live_tab_ids()
+                changes_now = structure_changes(records, same_browser=True, skip_ids=set())
+                if current_ids is None or changes_now is None:
+                    return False
+                current_records = changes_now[2]
+                protected = set(current_ids) ^ ids
+                protected.update(key for key in set(records) | set(current_records)
+                                 if records.get(key) != current_records.get(key))
+                intent.write_text(json.dumps(response))
+                for delivery in response["deliveries"]:
+                    changes = incoming(delivery)
+                    if changes is None:
+                        return False
+                    closed, tabs, sidebar, deleted, native = changes
+                    if native:
+                        return False
+                    applied_closed = [key for key in closed if key not in protected]
+                    applied_tabs = [record for record in tabs if not structure.record_ids([record]) & protected]
+                    applied_sidebar = [record for record in sidebar if not structure.record_ids([record]) & protected]
+                    applied_deleted = [key for key in deleted if key not in protected]
+                    report = apply_changes(applied_closed, applied_tabs, applied_sidebar, applied_deleted)
+                    if report is None or report.get("failed") or report.get("remaining"):
+                        return False
+                    ids = (ids - set(closed)) | structure.record_ids(tabs)
+                    records = structure.received(records, report, applied_tabs + applied_sidebar, closed)
+                    for key in deleted:
+                        records.pop(key, None)
+            finally:
+                clean = release_control()
+            if not clean:
                 return False
-            current_records = changes_now[2]
-            protected = set(current_ids) ^ ids
-            protected.update(key for key in set(records) | set(current_records)
-                             if records.get(key) != current_records.get(key))
-            intent.write_text(json.dumps(response))
-            for delivery in response["deliveries"]:
-                changes = incoming(delivery)
-                if changes is None:
-                    return False
-                closed, tabs, sidebar, deleted, native = changes
-                if native:
-                    return False
-                applied_closed = [key for key in closed if key not in protected]
-                applied_tabs = [record for record in tabs if not structure.record_ids([record]) & protected]
-                applied_sidebar = [record for record in sidebar if not structure.record_ids([record]) & protected]
-                applied_deleted = [key for key in deleted if key not in protected]
-                report = apply_changes(applied_closed, applied_tabs, applied_sidebar, applied_deleted)
-                if report is None or report.get("failed") or report.get("remaining"):
-                    return False
-                ids = (ids - set(closed)) | structure.record_ids(tabs)
-                records = structure.received(records, report, applied_tabs + applied_sidebar, closed)
-                for key in deleted:
-                    records.pop(key, None)
-        finally:
-            clean = release_control()
-        if not clean:
-            return False
         # A process change during the exchange cannot rebind deletion authority.
         if pending["identity"] != twilight_identity():
             return False
-        if not save_active_baseline(live=False, tab_ids_override=ids, records=records, stored_fingerprint=None):
+        if not save_active_baseline(live=False, tab_ids_override=ids, records=records,
+                                    stored_fingerprint=None if has_deliveries else pending.get("fingerprint")):
             return False
         pending["ack"] = {"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
                           "event": "participant-ack", "requestId": message["requestId"],
@@ -1108,7 +1128,7 @@ def participant_cycle(*, enroll: bool = False, replacing: bool = False) -> bool:
         temporary = pending_file.with_suffix(".tmp")
         temporary.write_text(json.dumps(pending))
         temporary.replace(pending_file)
-        intent.unlink()
+        intent.unlink(missing_ok=True)
     confirmed = participant_rpc(pending["ack"])
     if not confirmed or not confirmed.get("ok"):
         return False

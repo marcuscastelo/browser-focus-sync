@@ -27,7 +27,8 @@ import lz4.block
 DELETABLE_KINDS = frozenset({"space", "folder", "split"})
 # Tab fields that place a tab or name what it shows; selection and scroll are not structure.
 TAB_FIELDS = ("zenSyncId", "zenWorkspace", "groupId", "pinned", "zenEssential",
-              "userContextId", "zenStaticLabel", "zenIsEmpty")
+              "userContextId", "zenStaticLabel", "zenIsEmpty",
+              "_zenPinnedInitialState", "zenHasStaticIcon", "image")
 
 
 def read_session(profile: Path) -> dict:
@@ -36,19 +37,32 @@ def read_session(profile: Path) -> dict:
 
 
 
-def material_tab_ids(session: dict) -> set[str]:
-    """Match Zen's record-material flags; folder placeholders are host-local."""
-    return {tab["zenSyncId"] for tab in session.get("tabs", [])
-            if tab.get("zenSyncId") and not tab.get("zenIsEmpty")
-            and not tab.get("zenIsGlance") and not tab.get("zenLiveFolderItemId")}
+def shared_tab_ids(session: dict) -> set[str]:
+    """Match Zen's projected page identities, excluding local empty surfaces."""
+    result = set()
+    for tab in session.get("tabs", []):
+        if (not tab.get("zenSyncId") or tab.get("zenIsEmpty")
+                or tab.get("zenIsGlance") or tab.get("zenLiveFolderItemId")):
+            continue
+        initial = (tab.get("_zenPinnedInitialState") or {}) if tab.get("pinned") or tab.get("zenEssential") else {}
+        url = (initial.get("entry") or {}).get("url")
+        if not url or url == "about:blank":
+            url = current_url(tab)
+        if url and url != "about:blank":
+            result.add(tab["zenSyncId"])
+    return result
+
+
+def current_entry(tab: dict) -> dict:
+    entries = tab.get("entries") or []
+    if not entries:
+        return {}
+    index = min(max((tab.get("index") or len(entries)) - 1, 0), len(entries) - 1)
+    return entries[index] or {}
 
 
 def current_url(tab: dict) -> str | None:
-    entries = tab.get("entries") or []
-    if not entries:
-        return None
-    index = min(max((tab.get("index") or len(entries)) - 1, 0), len(entries) - 1)
-    return (entries[index] or {}).get("url")
+    return current_entry(tab).get("url")
 
 
 def fingerprint(session: dict) -> str:
@@ -58,7 +72,7 @@ def fingerprint(session: dict) -> str:
     tab order, placement and URL), so an unchanged fingerprint means there is
     nothing to send and control is not needed.
     """
-    tabs = [[tab.get(key) for key in TAB_FIELDS] + [current_url(tab)]
+    tabs = [[tab.get(key) for key in TAB_FIELDS] + [current_url(tab), current_entry(tab).get("title")]
             for tab in session.get("tabs", [])]
     structure = {key: session.get(key, []) for key in ("spaces", "folders", "groups", "splitViewData")}
     encoded = json.dumps({"tabs": tabs, "structure": structure}, sort_keys=True,

@@ -128,6 +128,9 @@ try:
     for name,index in [('polaris',1),('workstation',2)]:
         marker='real-cycle-'+name
         result=js(ports[index],"const tab=win.gBrowser.addTrustedTab('https://'+arguments[0]+'.invalid/',{inBackground:true,skipAnimation:true,createLazyBrowser:true,lazyTabTitle:arguments[0]});tab.id=arguments[0];tab.setAttribute('zen-workspace-id',arguments[1]);win.gZenWorkspaces.moveTabToWorkspace(tab,arguments[1]);return tab.id;",marker,seed['space']);assert result==marker,result
+        # The production change detector observes Zen's asynchronously saved file.
+        # Flush that native snapshot explicitly before testing the transport.
+        state(ports[index])
         for _ in range(2):
             assert agent_cycle('polaris')
             assert agent_cycle('workstation')
@@ -138,6 +141,7 @@ try:
     assert not agent_cycle('workstation',offline=True)
     for index,marker in [(1,'offline-other'),(2,'offline-later-local')]:
         result=js(ports[index],"const tab=win.gBrowser.addTrustedTab('https://'+arguments[0]+'.invalid/',{inBackground:true,skipAnimation:true,createLazyBrowser:true,lazyTabTitle:arguments[0]});tab.id=arguments[0];tab.setAttribute('zen-workspace-id',arguments[1]);win.gZenWorkspaces.moveTabToWorkspace(tab,arguments[1]);return tab.id;",marker,seed['space']);assert result==marker,result
+        state(ports[index])
     for _ in range(3):
         assert agent_cycle('polaris')
         assert agent_cycle('workstation')

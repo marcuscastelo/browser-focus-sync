@@ -587,6 +587,10 @@ class ParticipantCoordinator(Coordinator):
         temporary.replace(self.replica_file)
 
     def fanout(self, source: str, message: dict) -> None:
+        if not any(message.get(key) for key in (
+            "closedTabIds", "openedTabRecords", "structureRecords", "deletedStructureIds"
+        )):
+            return
         for participant, peer in self.replicas.items():
             if participant != source:
                 peer["queue"].append(message)
@@ -670,7 +674,10 @@ class ParticipantCoordinator(Coordinator):
         # Persist intent BEFORE touching the browser. Interrupted/failed applies
         # require explicit reconciliation, rather than replaying inferred closes.
         self.intent_file.write_text(json.dumps(message))
-        report = await self.apply_mac_changes(closed, opened, records, deleted)
+        changing = bool(closed or opened or records or deleted)
+        report = (await self.apply_mac_changes(closed, opened, records, deleted)) if changing else {
+            "ok": True, "before": local.records, "records": local.records,
+        }
         if report is None or report.get("failed") or report.get("remaining"):
             return {"ok": False, "error": "apply failed; intent retained"}
         if self.control_held:
@@ -684,7 +691,7 @@ class ParticipantCoordinator(Coordinator):
             return {"ok": False, "error": "hub identity changed; intent retained"}
         hub_records = structure.received(local.records, report, opened + records, closed)
         hub_ids = (local.tab_ids - set(closed)) | structure.record_ids(opened)
-        if not await self.save_linux_active_baseline(hub_ids, hub_records, None):
+        if not await self.save_linux_active_baseline(hub_ids, hub_records, None if changing else local.fingerprint):
             return {"ok": False, "error": "baseline commit failed; intent retained"}
         # Later serialized edits win over queued older edits of the same record.
         decided = set(closed) | structure.record_ids(opened + records) | set(deleted)
