@@ -996,12 +996,14 @@ def participant_rpc(message: dict) -> dict | None:
     return parse(result)
 
 
-def participant_cycle(*, enroll: bool = False) -> bool:
+def participant_cycle(*, enroll: bool = False, replacing: bool = False) -> bool:
     """Export before receiving, keep a durable retry until baseline and ACK commit."""
     pending_file = BASE / "participant-pending.json"
     intent = BASE / "participant-receive-intent.json"
     if intent.exists():
         raise RuntimeError("uncertain receive: reconcile intent and baselines offline")
+    if enroll and pending_file.exists():
+        return False
     if pending_file.exists():
         pending = json.loads(pending_file.read_text())
     else:
@@ -1035,8 +1037,10 @@ def participant_cycle(*, enroll: bool = False) -> bool:
         if not clean:
             return False
         if enroll:
+            if not same_browser or current != set(baseline["tabIds"]) or observed != base_records:
+                return False
             result = participant_rpc({"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
-                                      "event": "participant-enroll", "tabIds": baseline["tabIds"],
+                                      "event": "participant-reenroll" if replacing else "participant-enroll", "tabIds": baseline["tabIds"],
                                       "records": base_records})
             return bool(result and result.get("ok"))
         temporary = pending_file.with_suffix(".tmp")
@@ -1159,9 +1163,9 @@ def participant_initialize() -> int:
 def participant_main() -> int:
     cfg.validate_participant_config()
     arguments = sys.argv[1:]
-    if arguments not in ([], ["enroll"], ["snapshot"]):
+    if arguments not in ([], ["enroll"], ["reenroll"], ["snapshot"]):
         if len(arguments) != 2 or arguments[0] != "initialize":
-            raise ValueError("use no arguments, enroll, snapshot, or initialize PEER_SNAPSHOT")
+            raise ValueError("use no arguments, enroll, reenroll, snapshot, or initialize PEER_SNAPSHOT")
     cfg.prepare_directories()
     profile_lock = cfg.lock_profile_daemon("linux" if sys.platform == "linux" else "mac")
     import fcntl
@@ -1179,8 +1183,8 @@ def participant_main() -> int:
         return participant_initialize()
     if cfg.PARTICIPANT_ID == "sirius":
         raise ValueError("sirius runs coordinator.py only")
-    if sys.argv[1:] == ["enroll"]:
-        return 0 if participant_cycle(enroll=True) else 1
+    if sys.argv[1:] in (["enroll"], ["reenroll"]):
+        return 0 if participant_cycle(enroll=True, replacing=sys.argv[1] == "reenroll") else 1
     while True:
         if sys.platform != "linux":
             handle_reopen_request()

@@ -607,15 +607,28 @@ class ParticipantCoordinator(Coordinator):
             return {"ok": False, "error": "native sync is disabled in protocol 2"}
         peer = self.replicas.get(participant)
         event = message.get("event")
-        if event == "participant-enroll":
+        if event in {"participant-enroll", "participant-reenroll"}:
             baseline = self.read_linux_baseline()
-            if peer is not None or baseline is None:
-                return {"ok": False, "error": "existing participant or missing hub baseline"}
+            replacing = event == "participant-reenroll"
+            if (peer is not None) != replacing or baseline is None:
+                return {"ok": False, "error": "participant existence mismatch or missing hub baseline"}
             if sorted(message.get("tabIds", [])) != sorted(baseline["tabIds"]) or message.get("records") != baseline.get("records"):
                 return {"ok": False, "error": "inventories and record digests must be aligned"}
+            if replacing:
+                # Explicit recovery of a formatted host, only after exact alignment.
+                # Preserve the old queue/reply before acknowledging the new baseline.
+                archive = STATE_DIR / f"{participant}-before-reenroll-{time.time_ns()}.json"
+                archive.write_text(json.dumps(peer))
             self.replicas[participant] = {"queue": [], "last": None, "reply": None,
                                           "tabIds": baseline["tabIds"], "records": baseline["records"]}
-            self.persist_replicas()
+            try:
+                self.persist_replicas()
+            except OSError:
+                if peer is None:
+                    self.replicas.pop(participant, None)
+                else:
+                    self.replicas[participant] = peer
+                raise
             return {"ok": True}
         if peer is None:
             return {"ok": False, "error": "explicit enrollment required"}

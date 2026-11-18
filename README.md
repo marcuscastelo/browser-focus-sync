@@ -481,3 +481,12 @@ boundaries. It tests additions from every host, closure and an offline pending
 request followed by concurrent additions. Set `BFS_LAB_ROOT` to a private disk
 directory if the system temporary directory is a small tmpfs. Neither test opens
 a real user profile. They do not replace cross-platform rollout validation.
+
+For a formatted machine whose participant ID already exists at the coordinator,
+restore and align first, initialize its genuinely absent local baseline, then run
+`mac_agent.py reenroll` instead of `enroll`. This explicit recovery requires IDs
+and record digests exactly equal to the coordinator baseline, refuses uncertain
+apply state, and archives the previous peer queue/reply privately before replacing
+it. It does not import data or waive alignment, and never runs automatically.
+Keep another participant online to flush pending coordinator edits before comparing
+snapshots; an unacknowledged local change is not an aligned recovery baseline.

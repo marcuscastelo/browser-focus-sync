@@ -110,6 +110,31 @@ class Participants(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.hub.replicas['polaris']['last'])
 
 
+    async def test_reenroll_requires_exact_alignment_and_archives_prior_queue(self):
+        prior = copy.deepcopy(self.hub.replicas['workstation'])
+        self.hub.replicas['workstation']['queue'].append({'closedTabIds': ['old']})
+        wrong = await self.call('workstation', 'participant-reenroll', tabIds=['different'], records={'f': ['folder', 'd']})
+        self.assertFalse(wrong['ok'])
+        self.assertTrue(self.hub.replicas['workstation']['queue'])
+        right = await self.call('workstation', 'participant-reenroll', tabIds=['t'], records={'f': ['folder', 'd']})
+        self.assertTrue(right['ok'])
+        archives = list(self.hub.replica_file.parent.glob('workstation-before-reenroll-*.json'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(json.loads(archives[0].read_text())['queue'], [{'closedTabIds': ['old']}])
+        self.assertEqual(self.hub.replicas['workstation']['queue'], [])
+
+
+
+    async def test_reenroll_persistence_failure_keeps_old_peer_in_memory(self):
+        self.hub.replicas['workstation']['queue'].append({'closedTabIds': ['old']})
+        before = copy.deepcopy(self.hub.replicas['workstation'])
+        with patch.object(self.hub, 'persist_replicas', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                await self.call('workstation', 'participant-reenroll', tabIds=['t'], records={'f': ['folder', 'd']})
+        self.assertEqual(self.hub.replicas['workstation'], before)
+
+
+
 class ParticipantAgent(unittest.TestCase):
     def setUp(self):
         import mac_agent as m
@@ -231,3 +256,25 @@ class ParticipantAgent(unittest.TestCase):
             self.assertFalse(self.m.participant_cycle())
         self.assertTrue((self.root / 'participant-pending.json').is_file())
         self.assertFalse((self.root / 'participant-receive-intent.json').exists())
+
+    def test_reenroll_refuses_stale_identity_ids_or_digests_without_rpc(self):
+        baseline_file = self.root / 'active-baseline.json'
+        for baseline in (
+            {'identity': 'old', 'tabIds': ['added'], 'records': {'f': ['folder', 'd']}},
+            {'identity': 'new', 'tabIds': ['t'], 'records': {'f': ['folder', 'd']}},
+            {'identity': 'new', 'tabIds': ['added'], 'records': {'f': ['folder', 'old']}},
+        ):
+            baseline_file.write_text(json.dumps(baseline))
+            with patch.object(self.m, 'participant_rpc') as rpc:
+                self.assertFalse(self.m.participant_cycle(enroll=True, replacing=True))
+                rpc.assert_not_called()
+        baseline_file.write_text(json.dumps({'identity': 'new', 'tabIds': ['added'], 'records': {'f': ['folder', 'd']}}))
+        with patch.object(self.m, 'participant_rpc', return_value={'ok': True}) as rpc:
+            self.assertTrue(self.m.participant_cycle(enroll=True, replacing=True))
+            self.assertEqual(rpc.call_args.args[0]['event'], 'participant-reenroll')
+
+    def test_reenroll_refuses_pending_transfer_without_exchange(self):
+        (self.root / 'participant-pending.json').write_text('{}')
+        with patch.object(self.m, 'participant_rpc') as rpc:
+            self.assertFalse(self.m.participant_cycle(enroll=True, replacing=True))
+            rpc.assert_not_called()
