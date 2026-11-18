@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import re
 import base64
 import configparser
@@ -165,9 +166,6 @@ def install_bridge() -> bool:
               const { Marionette } = ChromeUtils.importESModule(
                 "chrome://remote/content/components/Marionette.sys.mjs"
               );
-              const { RecommendedPreferences } = ChromeUtils.importESModule(
-                "chrome://remote/content/shared/RecommendedPreferences.sys.mjs"
-              );
               const win = Services.wm.getMostRecentBrowserWindow();
               if (!win) {
                 done(false);
@@ -199,9 +197,6 @@ def install_bridge() -> bool:
                       lastError = { op, at: Date.now(), message: String(error && error.message || error).slice(0, 300) };
                       opError = error;
                     }
-                  }
-                  if (desired !== "on") {
-                    RecommendedPreferences.restoreAllPreferences();
                   }
                   const now = Date.now();
                   const statusKey = `${Marionette.running}:${Marionette.isBrowserAutomationRunning}:${lastError ? lastError.op + lastError.message : ""}`;
@@ -281,6 +276,8 @@ def twilight_profile() -> Path:
 def tab_ids(profile: Path) -> set[str]:
     payload = (profile / "zen-sessions.jsonlz4").read_bytes()
     data = json.loads(lz4.block.decompress(payload[8:]))
+    if cfg.MULTIPARTICIPANT:
+        return structure.shared_tab_ids(data)
     return {tab["zenSyncId"] for tab in data.get("tabs", []) if tab.get("zenSyncId")}
 
 
@@ -988,8 +985,239 @@ def leave_mac_for_linux() -> bool | None:
     )
 
 
+
+def participant_rpc(message: dict) -> dict | None:
+    encoded = base64.urlsafe_b64encode(json.dumps(message).encode()).decode()
+    try:
+        result = run([*REMOTE_CTL, "-"], input_data="base64:" + encoded)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        print(f"participant transport unavailable: {type(error).__name__}", flush=True)
+        return None
+    if result.returncode != 0:
+        return None
+    return parse(result)
+
+
+def participant_cycle(*, enroll: bool = False, replacing: bool = False) -> bool:
+    """Export before receiving, keep a durable retry until baseline and ACK commit."""
+    pending_file = BASE / "participant-pending.json"
+    intent = BASE / "participant-receive-intent.json"
+    if intent.exists():
+        raise RuntimeError("uncertain receive: reconcile intent and baselines offline")
+    if enroll and pending_file.exists():
+        return False
+    if pending_file.exists():
+        pending = json.loads(pending_file.read_text())
+    else:
+        baseline = json.loads(ACTIVE_BASELINE.read_text())
+        base_records = structure.valid_digests(baseline.get("records"))
+        if base_records is None:
+            raise ValueError("explicit aligned baseline with digests required")
+        same_browser = baseline.get("identity") == twilight_identity()
+        profile = twilight_profile()
+        snapshot_fingerprint = fingerprint(profile)
+        unchanged = (not enroll and same_browser and snapshot_fingerprint is not None
+                     and snapshot_fingerprint == baseline.get("fingerprint"))
+        current = tab_ids(profile) if unchanged else None
+        unchanged = unchanged and current == set(baseline["tabIds"])
+        if unchanged:
+            tabs, records, deleted, observed = [], [], [], base_records
+        else:
+            if not ensure_control():
+                return False
+            try:
+                current = live_tab_ids()
+                if current is None:
+                    return False
+                same_browser = baseline.get("identity") == twilight_identity()
+                opened = current - set(baseline["tabIds"])
+                tabs = export_tab_records(opened)
+                changes = structure_changes(base_records, same_browser=same_browser, skip_ids=opened)
+                if tabs is None or changes is None:
+                    return False
+                records, deleted, observed = changes
+                collected_fingerprint = fingerprint(profile)
+                # Only cache a file fingerprint that stayed stable across the
+                # live collection; a newer save must be exported next cycle.
+                if collected_fingerprint != snapshot_fingerprint:
+                    snapshot_fingerprint = None
+            finally:
+                clean = release_control()
+            if not clean:
+                return False
+        message = {"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
+                   "event": "participant-exchange", "requestId": str(time.time_ns()),
+                   "sameBrowser": same_browser, "baselineRecords": base_records,
+                   "closedTabIds": sorted(set(baseline["tabIds"]) - current) if same_browser else [],
+                   "openedTabRecords": tabs, "structureRecords": records,
+                   "deletedStructureIds": deleted}
+        pending = {"message": message, "tabIds": sorted(current), "records": observed,
+                   "identity": twilight_identity(), "fingerprint": snapshot_fingerprint}
+        if enroll:
+            if not same_browser or current != set(baseline["tabIds"]) or observed != base_records:
+                return False
+            result = participant_rpc({"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
+                                      "event": "participant-reenroll" if replacing else "participant-enroll", "tabIds": baseline["tabIds"],
+                                      "records": base_records})
+            return bool(result and result.get("ok"))
+        temporary = pending_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(pending))
+        temporary.replace(pending_file)
+    message = pending["message"]
+    if pending["identity"] != twilight_identity():
+        return False
+    if "ack" not in pending:
+        response = participant_rpc(message)
+        if not response or not response.get("ok") or response.get("requestId") != message["requestId"]:
+            return False
+        ids = set(pending["tabIds"])
+        records = pending["records"]
+        has_deliveries = any(any(delivery.get(key) for key in (
+            "closedTabIds", "openedTabRecords", "structureRecords", "deletedStructureIds", "nativeSyncRequired"
+        )) for delivery in response["deliveries"])
+        if has_deliveries:
+            if not ensure_control():
+                return False
+            try:
+                # The browser may have changed while this exact request was offline.
+                # Keep later local edits pending instead of overwriting them with an
+                # older queued delivery. ACK the logical delivery, then export those
+                # retained differences on the next cycle.
+                if pending["identity"] != twilight_identity():
+                    return False
+                current_ids = live_tab_ids()
+                changes_now = structure_changes(records, same_browser=True, skip_ids=set())
+                if current_ids is None or changes_now is None:
+                    return False
+                current_records = changes_now[2]
+                protected = set(current_ids) ^ ids
+                protected.update(key for key in set(records) | set(current_records)
+                                 if records.get(key) != current_records.get(key))
+                intent.write_text(json.dumps(response))
+                for delivery in response["deliveries"]:
+                    changes = incoming(delivery)
+                    if changes is None:
+                        return False
+                    closed, tabs, sidebar, deleted, native = changes
+                    if native:
+                        return False
+                    applied_closed = [key for key in closed if key not in protected]
+                    applied_tabs = [record for record in tabs if not structure.record_ids([record]) & protected]
+                    applied_sidebar = [record for record in sidebar if not structure.record_ids([record]) & protected]
+                    applied_deleted = [key for key in deleted if key not in protected]
+                    report = apply_changes(applied_closed, applied_tabs, applied_sidebar, applied_deleted)
+                    if report is None or report.get("failed") or report.get("remaining"):
+                        return False
+                    ids = (ids - set(closed)) | structure.record_ids(tabs)
+                    records = structure.received(records, report, applied_tabs + applied_sidebar, closed)
+                    for key in deleted:
+                        records.pop(key, None)
+            finally:
+                clean = release_control()
+            if not clean:
+                return False
+        # A process change during the exchange cannot rebind deletion authority.
+        if pending["identity"] != twilight_identity():
+            return False
+        if not save_active_baseline(live=False, tab_ids_override=ids, records=records,
+                                    stored_fingerprint=None if has_deliveries else pending.get("fingerprint")):
+            return False
+        pending["ack"] = {"protocol": 2, "participantId": cfg.PARTICIPANT_ID,
+                          "event": "participant-ack", "requestId": message["requestId"],
+                          "tabIds": sorted(ids), "baselineRecords": records}
+        temporary = pending_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(pending))
+        temporary.replace(pending_file)
+        intent.unlink(missing_ok=True)
+    confirmed = participant_rpc(pending["ack"])
+    if not confirmed or not confirmed.get("ok"):
+        return False
+    pending_file.unlink()
+    return True
+
+
+
+def participant_initialize() -> int:
+    """Explicit aligned initialization; never replace an existing baseline."""
+    hub = cfg.PARTICIPANT_ID == "sirius"
+    destination = BASE / "linux-active-baseline.json" if hub else ACTIVE_BASELINE
+    if sys.argv[1] == "initialize":
+        if len(sys.argv) != 3:
+            raise ValueError("initialize requires a private peer snapshot file")
+        protected = [destination, BASE / "participant-pending.json",
+                     BASE / "participant-receive-intent.json", cfg.STATE_DIR / "participants.json",
+                     cfg.STATE_DIR / "participant-apply-intent.json", cfg.STATE_DIR / "state.json"]
+        if any(item.exists() for item in protected):
+            raise ValueError("existing baseline/state: explicit reconciliation required")
+    with contextlib.redirect_stdout(sys.stderr):
+        controlled = ensure_control()
+    if not controlled:
+        return 1
+    identity = twilight_identity()
+    try:
+        ids = live_tab_ids()
+        result = run([str(PYTHON), str(STRUCTURE_RECORDS), "state"])
+        state = parse(result) or {}
+        records = structure.valid_digests(state.get("records"))
+        if ids is None or not ids or result.returncode != 0 or records is None or identity is None:
+            return 1
+        snapshot = {"tabIds": sorted(ids), "records": records}
+    finally:
+        with contextlib.redirect_stdout(sys.stderr):
+            clean = release_control()
+    if not clean or identity != twilight_identity():
+        return 1
+    if sys.argv[1] == "snapshot":
+        print(json.dumps(snapshot))
+        return 0
+    peer = json.loads(Path(sys.argv[2]).read_text())
+    if peer != snapshot:
+        raise ValueError("live inventory/digests differ; no baseline written")
+    if hub:
+        import asyncio
+        import coordinator
+        saved = asyncio.run(coordinator.Coordinator().save_linux_active_baseline(ids, records, None))
+    else:
+        saved = save_active_baseline(live=False, tab_ids_override=ids, records=records, stored_fingerprint=None)
+    return 0 if saved else 1
+
+
+def participant_main() -> int:
+    cfg.validate_participant_config()
+    arguments = sys.argv[1:]
+    if arguments not in ([], ["enroll"], ["reenroll"], ["snapshot"]):
+        if len(arguments) != 2 or arguments[0] != "initialize":
+            raise ValueError("use no arguments, enroll, reenroll, snapshot, or initialize PEER_SNAPSHOT")
+    cfg.prepare_directories()
+    profile_lock = cfg.lock_profile_daemon("linux" if sys.platform == "linux" else "mac")
+    import fcntl
+    daemon_lock = (BASE / "participant-daemon.lock").open("a")
+    fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if sys.platform == "linux":
+        import linux_control
+        # Reuse exactly the Linux bridge/lease and profile adapter.
+        globals().update(ensure_control=linux_control.acquire,
+                         release_control=linux_control.release,
+                         twilight_identity=linux_control.twilight_identity,
+                         twilight_profile=linux_control.profile_path,
+                         live_tab_ids=linux_control.live_tab_ids)
+    if sys.argv[1:2] in (["snapshot"], ["initialize"]):
+        return participant_initialize()
+    if cfg.PARTICIPANT_ID == "sirius":
+        raise ValueError("sirius runs coordinator.py only")
+    if sys.argv[1:] in (["enroll"], ["reenroll"]):
+        return 0 if participant_cycle(enroll=True, replacing=sys.argv[1] == "reenroll") else 1
+    while True:
+        if sys.platform != "linux":
+            handle_reopen_request()
+            adopt_startup_listener()
+        participant_cycle()
+        time.sleep(IDLE_PROBE_SECONDS)
+
+
 def main() -> int:
     cfg.prepare_directories()
+    profile_lock = cfg.lock_profile_daemon("mac")
     mac_was_active: bool | None = None
     leave_reported = False
     next_idle_probe_at = 0.0
@@ -1032,4 +1260,6 @@ def main() -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["reopen"]:
         sys.exit(request_reopen())
+    if cfg.MULTIPARTICIPANT:
+        sys.exit(participant_main())
     sys.exit(main())

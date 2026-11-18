@@ -14,6 +14,7 @@ import json
 import sys
 
 import bridge_client
+import bfs_config as cfg
 from pathlib import Path
 
 from marionette_driver.errors import MarionetteException
@@ -23,6 +24,7 @@ MAX_RECORDS = 5000
 
 PRELUDE = """
 const done = arguments[arguments.length - 1];
+const multiparticipant = arguments[arguments.length - 2] === true;
 const { ZenSpacesSyncModel, recordDigest } = ChromeUtils.importESModule(
   "resource:///modules/zen/ZenSpacesSyncModel.sys.mjs");
 const { ZenSessionStore } = ChromeUtils.importESModule(
@@ -43,10 +45,24 @@ const collect = async () => {
   await SessionSaver.run();
   ZenSpacesSyncModel.invalidate();
 };
+const transportData = (projected, forDigest = false) => {
+  const data = { ...projected.data };
+  if (!multiparticipant) return data;
+  // Empty local surfaces can appear in native child order without a page
+  // projection. They must not become shared ordering or deletion authority.
+  if (Array.isArray(data.children)) {
+    const shared = new Set([...ZenSpacesSyncModel.projections()].map(([id]) => id));
+    data.children = data.children.filter(id => shared.has(id));
+  }
+  // A loaded page keeps its own fetched favicon in the native applier.
+  // Static user icons remain shared; ordinary cache differences do not.
+  if (forDigest && projected.kind === "tab" && !data.hasStaticIcon) data.icon = null;
+  return data;
+};
 const digests = () => {
   const result = {};
   for (const [id, projected] of ZenSpacesSyncModel.projections()) {
-    result[id] = [projected.kind, recordDigest(projected.kind, projected.data)];
+    result[id] = [projected.kind, recordDigest(projected.kind, transportData(projected, true))];
   }
   return result;
 };
@@ -62,7 +78,7 @@ const presentIds = () => {
 const exportRecord = id => {
   const projected = ZenSpacesSyncModel.projectRecord(id);
   if (!projected) return null;
-  const data = { ...projected.data };
+  const data = transportData(projected);
   if (typeof data.icon === "string" && data.icon.startsWith("data:") && data.icon.length > 100000) {
     data.icon = null;
   }
@@ -226,7 +242,7 @@ def run_script(script: str, args: list, port: int, timeout: int) -> dict:
     try:
         bridge_client.start_chrome_session(client)
         client.timeout.script = timeout
-        return client.execute_async_script(script, script_args=args)
+        return client.execute_async_script(script, script_args=[*args, cfg.MULTIPARTICIPANT])
     finally:
         try:
             client.delete_session()

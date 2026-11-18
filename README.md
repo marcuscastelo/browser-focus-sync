@@ -18,7 +18,7 @@ installer/configuration is new: validate it with disposable profiles first.
 
 | Works toward | Does not do |
 | --- | --- |
-| Open/close handoff between one Linux and one Mac | Arbitrary peers or concurrent multi-writer merging |
+| Legacy handoff between one Linux and one Mac; opt-in three-participant protocol below | Arbitrary peers or conflict-free concurrent merging |
 | Preserve pending edits across focus changes | Initial automatic union of divergent profiles |
 | Resume baselines across browser process changes | Live mirroring of navigation history or scroll position |
 | Turn Marionette off after operations | Guarantee cleanup if the process is killed mid-operation |
@@ -293,3 +293,229 @@ script is part of this repository.
 
 MIT licensed. Mozilla/Zen and the Python dependencies are separate projects with
 their own licenses; their source is not vendored here.
+
+## Opt-in three-participant runtime (protocol 2)
+
+Protocol 2 uses **one Sirius coordinator** and two instances of the existing
+`mac_agent.py`: Polaris uses the Mac adapter; workstation uses `linux_control`.
+It polls every ten seconds, including while idle, so offline edits are exported
+before queued remote edits are received. This is serialized replication through
+the existing export/apply bridge, rather than exclusive focus ownership. No new
+module, native Spaces Sync or second Linux coordinator is involved.
+
+All three configurations must set:
+
+```toml
+[sync]
+multiparticipant = true
+participant_id = "sirius" # polaris or workstation on the corresponding host
+allow_native_structure_sync = false
+```
+
+Keep `services.sync.engine.spaces = false` in all browsers. Each host retains its
+own private data/state directories and explicit local profile/executable section:
+`[linux]` for Sirius/workstation, `[mac]` for Polaris. Both agents currently read
+SSH `linux_host` and `remote_ctl` from `[mac]`, including workstation; these name
+the **same Sirius** protocol client. No real host aliases belong in this repo.
+The existing installer does not select the workstation role: configure its
+launcher separately, after validating disposable profiles. Do not start the
+installer's Linux coordinator there.
+
+Initialization is explicit, with all daemons stopped and edits paused:
+
+1. Back up all three complete profiles and existing runtime state privately.
+2. Preserve the established Sirius/Polaris baseline. Align workstation IDs and
+   full record digests intentionally; there is no automatic union or force seed.
+   Each local baseline must have `tabIds`, `identity` and `records` digests. A
+   legacy baseline without digests must be reconciled before enabling protocol 2.
+   `linux-active-baseline.json` remains Sirius's baseline;
+   `active-baseline.json` remains each agent's baseline. Never copy another
+   process's identity into a baseline or reseed to bypass an error.
+3. Bootstrap the existing control bridge on each disposable browser as described
+   above. Start only `runtime/coordinator.py` on Sirius with protocol 2 enabled.
+4. Run `runtime/mac_agent.py enroll` locally on each remote participant. Enrollment
+   refuses existing participants and requires exact baseline IDs and digests
+   equal to Sirius's baseline. Keep edits paused until both enrollments finish.
+5. Start `runtime/mac_agent.py` once on Polaris and once on workstation. Each
+   daemon holds a lifetime exclusive lock in its configured profile, in addition
+   to the existing operation leases. All daemons must use this version for that
+   lock to protect against duplicate roles. Old binaries cannot honor the lock.
+
+Protocol messages have `protocol: 2`, `participantId`, `event` and `requestId`.
+The coordinator rejects legacy mutation events in this mode. `focusctl.py -`
+accepts JSON through stdin over the existing SSH route; `status` reports enrolled
+participants and an uncertain-application block. Protocol 1 remains the default
+when `multiparticipant` is absent/false, using its existing state files.
+
+Sirius exports local changes before applying a peer's changes under one global
+lock/lease. It queues both sets of changes for other participants. It keeps the
+exact reply until an explicit participant ACK; retries with the same request ID
+return that reply, and reusing an ID with different content is rejected. ACKs
+carry the participant's observed baseline. Closures are restricted to its
+acknowledged IDs; browser identity changes suppress inferred deletions and
+updates of existing records. Third-party deliveries update that participant's
+baseline when applied, so they remain visible to subsequent comparisons.
+Concurrent edits to distinct records survive; for the same record, the later
+serialized peer edit wins over older queued edits. Existing applier rules still
+apply (loaded tabs are not navigated; updates do not resurrect absent records;
+nonempty folders/Spaces may be retained). This is not a CRDT or history sync.
+
+Failures do not acknowledge a transfer. `participant-pending.json` retains the
+exact exported request or pending ACK across agent restarts. Before applying,
+Sirius writes `participant-apply-intent.json`; an agent receiving changes writes
+`participant-receive-intent.json`. A failed/partial apply, baseline persistence
+failure or crash in that interval blocks further inference. **Do not delete an
+intent merely to retry.** Stop all daemons, preserve state/profile backups,
+inspect the saved request/reply and actual resulting inventories/digests, and
+reconcile the affected baselines and queues explicitly before clearing the
+intent. There is deliberately no automated reseed/recovery command. Atomic file
+replacement covers process interruption; power-loss durability is not guaranteed.
+Queues have no retention limit; a long-offline peer may exceed the existing
+16 MiB transport limit and require offline reconciliation. Sirius must be online
+for replication; real-browser cross-version validation remains required.
+
+Reversible rollout: validate in three disposable profiles first (addition,
+closure and folder move in each direction, offline edits, lost reply/ACK and
+restart); stop all old daemons before switching launch commands. Keep the pinned
+old version and original state untouched as rollback evidence. To roll back,
+stop all three protocol-2 processes, back up their current profiles/state, drain
+or explicitly reconcile pending changes, and restore the pair's launch commands
+with protocol 2 disabled. Do not restore stale profiles/baselines over newer
+edits. Leave workstation stopped until its divergence is reconciled. This source
+change installs or starts nothing on real machines.
+
+### Exact Linux role configuration and bootstrap commands
+
+Example **Sirius** config (replace paths outside Git):
+
+```toml
+[paths]
+data_dir = "/absolute/private/sirius-data"
+state_dir = "/absolute/private/sirius-state"
+socket_path = "/absolute/private/sirius-state/coordinator.sock"
+[linux]
+executable = "/absolute/browser/zen-bin"
+profile = "/absolute/private/sirius-profile"
+[sync]
+multiparticipant = true
+participant_id = "sirius"
+allow_native_structure_sync = false
+```
+
+Example **workstation** config:
+
+```toml
+[paths]
+data_dir = "/absolute/private/workstation-data"
+state_dir = "/absolute/private/workstation-state"
+[linux]
+executable = "/absolute/browser/zen-bin"
+profile = "/absolute/private/workstation-profile"
+[mac] # SSH transport settings are shared with the existing Mac agent
+linux_host = "coordinator-ssh-alias"
+remote_ctl = "env BROWSER_FOCUS_SYNC_CONFIG=/absolute/private/sirius.toml /absolute/venv/bin/python /absolute/source/runtime/focusctl.py"
+[sync]
+multiparticipant = true
+participant_id = "workstation"
+allow_native_structure_sync = false
+```
+
+Polaris uses its existing `[mac]` profile/executable/transport, private paths and
+`participant_id = "polaris"`. Set `BROWSER_FOCUS_SYNC_CONFIG` in every service's
+environment; use absolute paths for Python and source. The source can run with
+an existing venv containing the pinned requirements. In the following commands,
+`$BFS_PYTHON` and `$BFS_SOURCE` are those paths, and the config environment is
+already set for the local host:
+
+```sh
+# Each Linux browser: manually launch selected profile with the documented flags.
+"$BFS_PYTHON" "$BFS_SOURCE/manage.py" --platform linux bootstrap-control
+# Polaris uses --platform mac instead.
+
+# All hosts, with daemons stopped and profiles intentionally aligned:
+umask 077
+"$BFS_PYTHON" "$BFS_SOURCE/runtime/mac_agent.py" snapshot > /private/local-snapshot.json
+# Exchange ID/digest snapshots privately; compare all three, no edits meanwhile.
+# ONLY for a host with NO baseline/state: explicitly create its first baseline.
+"$BFS_PYTHON" "$BFS_SOURCE/runtime/mac_agent.py" initialize /private/peer-snapshot.json
+
+# Sirius only (service ExecStart):
+"$BFS_PYTHON" "$BFS_SOURCE/runtime/coordinator.py"
+# Then once on each remote, before starting its service:
+"$BFS_PYTHON" "$BFS_SOURCE/runtime/mac_agent.py" enroll
+# Polaris and workstation only (their separate service ExecStart):
+"$BFS_PYTHON" "$BFS_SOURCE/runtime/mac_agent.py"
+```
+
+`snapshot` inspects live IDs/digests using the existing lease. `initialize`
+compares them exactly to the private peer snapshot, writes the role's baseline,
+and refuses any existing baseline, pending transfer, intent or coordinator state.
+For an established Sirius/Polaris deployment, **do not run initialize**: preserve
+and inspect their acknowledged baselines. If they lack digests or are divergent,
+stop for explicit reconciliation; initialization cannot upgrade them silently.
+
+A formatted/fresh machine first needs its identities and structure restored,
+using the existing `export_tab_records.py` and `structure_records.py export/apply`
+under the existing control lease, or a deliberately aligned profile restoration.
+`initialize` and `enroll` only validate alignment; they do not restore structure.
+An export/apply payload is private browser data and must never enter Git. Verify
+live snapshots after restoration and before creating a genuinely absent baseline.
+There is no automatic fresh-machine restore command in this runtime; existing
+baselines always take the refusal path, even after formatting/reinstalling the
+browser. Stop rather than using initialization to acknowledge a divergent session.
+
+### Bridge lifetime on current Gecko
+
+The original window timer remains in use. Both adapters omit the obsolete
+`RecommendedPreferences.restoreAllPreferences()` call: current Gecko removed it,
+and its exception prevented the off status from being written after Marionette
+had already stopped. `remote.prefs.recommended=false` prevents automation prefs
+from being applied. Temporary control must stop both the listener and
+`webdriverActive` after each operation. `tests/bridge_lifetime.py runtime` is a
+manual Linux proof against a fresh headless Twilight: it installs the real bridge,
+ends the installer session, and checks three acquire/release cycles.
+
+`tests/three_browser.py runtime` exercises the real coordinator and participant
+cycle against three disposable Linux browsers, adapting only host/port/process
+boundaries. It tests additions from every host, closure and an offline pending
+request followed by concurrent additions. Set `BFS_LAB_ROOT` to a private disk
+directory if the system temporary directory is a small tmpfs. Neither test opens
+a real user profile. They do not replace cross-platform rollout validation.
+
+For a formatted machine whose participant ID already exists at the coordinator,
+restore and align first, initialize its genuinely absent local baseline, then run
+`mac_agent.py reenroll` instead of `enroll`. This explicit recovery requires IDs
+and record digests exactly equal to the coordinator baseline, refuses uncertain
+apply state, and archives the previous peer queue/reply privately before replacing
+it. It does not import data or waive alignment, and never runs automatically.
+Keep another participant online to flush pending coordinator edits before comparing
+snapshots; an unacknowledged local change is not an aligned recovery baseline.
+
+Protocol-2 tab inventories use Zen's projected page identities: native folder
+placeholders, Glance, live-folder virtual items and empty surfaces without a page
+identity remain local. They are preserved, never inferred as shared closures.
+Their IDs differ between hosts and current browser versions, so comparing them
+as shared pages would create false closures and block enrollment. Legacy
+protocol-1 inventories and its blank-tab exporter keep their previous behavior.
+Initial alignment compares projected IDs and digests, never these local UI IDs.
+
+Quiet protocol-2 polls compare stored fingerprints and IDs and exchange empty
+ACKs without creating a browser-control session. Empty batches are not fanned
+out. Incoming mutations or a changed local snapshot still use the same lease and
+live exporter. A fingerprint changed during collection is never cached as
+acknowledged, so later local edits remain pending for the next cycle.
+
+The quiet change detector observes Zen's saved session file; native UI saves are
+asynchronous. The disposable transport test explicitly flushes the native
+snapshot after mutations, so its bounded cycles test replication rather than
+the browser's save timer. Changes made while a request is offline remain pending
+even if the saved file has not caught up yet; receive-side live comparisons keep
+them protected.
+
+Protocol-2 record digests omit ordinary fetched tab favicons (the native applier
+keeps a loaded page's cache) while retaining static user icons. Exported records
+still carry the favicon for best-effort rendering. Parent child-order records
+include only IDs that have native projections, so local empty surfaces do not
+make otherwise identical shared trees appear different across browser versions.
+Workspace/folder icons, page identity, pinning, placement and shared order remain
+part of the digest. Protocol-1 records and digests are unchanged.

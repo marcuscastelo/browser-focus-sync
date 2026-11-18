@@ -45,7 +45,7 @@ def main() -> int:
         result = client.execute_async_script(
             """
               const done = arguments[arguments.length - 1];
-              const [reason, onlyIfSpacesPending, inspect, maxTombstones, allowedTombstones] = arguments;
+              const [reason, onlyIfSpacesPending, inspect, maxTombstones, allowedTombstones, multiparticipant] = arguments;
               const accountConfigPrefs = [
                 "identity.fxaccounts.remote.root",
                 "identity.fxaccounts.auth.uri",
@@ -104,9 +104,10 @@ def main() -> int:
                 done({
                   ok: true,
                   ...counts(),
-                  tabIds: (sidebar.tabs || [])
-                    .map(tab => tab.zenSyncId)
-                    .filter(Boolean),
+                  tabIds: multiparticipant
+                    ? [...ZenSpacesSyncModel.projections()]
+                        .filter(([, record]) => record.kind === "tab").map(([id]) => id)
+                    : (sidebar.tabs || []).map(tab => tab.zenSyncId).filter(Boolean),
                   tombstoneIds: Object.keys(changes).filter(
                     id => !ZenSpacesSyncModel.projectRecord(id)
                   ),
@@ -183,6 +184,7 @@ def main() -> int:
                 args.inspect,
                 args.max_tombstones,
                 allowed_tombstones,
+                cfg.MULTIPARTICIPANT,
             ],
         )
     except (OSError, MarionetteException, bridge_client.BridgeError) as error:

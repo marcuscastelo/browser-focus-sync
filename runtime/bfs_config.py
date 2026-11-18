@@ -83,3 +83,24 @@ def prepare_directories() -> None:
             raise ValueError(f"Refusing symlinked state directory: {directory}")
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory.chmod(0o700)
+
+
+# Explicit opt-in: legacy two-host deployments keep their existing protocol/state.
+MULTIPARTICIPANT = bool(get("sync", "multiparticipant", False))
+PARTICIPANT_ID = get("sync", "participant_id", "")
+PARTICIPANTS = ("polaris", "sirius", "workstation")
+
+
+def validate_participant_config() -> None:
+    if PARTICIPANT_ID not in PARTICIPANTS:
+        raise ValueError("sync.participant_id must be polaris, sirius or workstation")
+    if get("sync", "allow_native_structure_sync", False):
+        raise ValueError("multiparticipant requires native Spaces Sync disabled")
+
+
+def lock_profile_daemon(platform: str):
+    """Lifetime lock shared by coordinator and participant roles for this profile."""
+    import fcntl
+    lock = (profile(platform) / ".browser-focus-sync-daemon.lock").open("a")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return lock
