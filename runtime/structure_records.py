@@ -42,6 +42,9 @@ const win = Services.wm.getMostRecentWindow("navigator:browser");
 // Collect now: projections follow the stored sidebar, which otherwise lags the
 // window by the session save interval.
 const collect = async () => {
+  if (multiparticipant && Services.prefs.getBoolPref("services.sync.engine.spaces", false)) {
+    throw new Error("native Spaces Sync is enabled; refusing protocol 2 control");
+  }
   await SessionSaver.run();
   ZenSpacesSyncModel.invalidate();
 };
