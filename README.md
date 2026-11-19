@@ -519,3 +519,10 @@ include only IDs that have native projections, so local empty surfaces do not
 make otherwise identical shared trees appear different across browser versions.
 Workspace/folder icons, page identity, pinning, placement and shared order remain
 part of the digest. Protocol-1 records and digests are unchanged.
+
+Ordinary unpinned page titles are also presentation cache: live sites can change
+them independently without navigation. Their export hint remains, but their
+digest omits that hint. Static user labels, pinned/essential titles and URLs
+remain shared. This prevents background title updates from blocking aligned
+initialization or enrollment. The quiet fingerprint uses the same exclusion,
+so a background title update alone does not attach browser control.

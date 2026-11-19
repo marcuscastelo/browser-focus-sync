@@ -23,6 +23,7 @@ import json
 from pathlib import Path
 
 import lz4.block
+import bfs_config as cfg
 
 DELETABLE_KINDS = frozenset({"space", "folder", "split"})
 # Tab fields that place a tab or name what it shows; selection and scroll are not structure.
@@ -72,8 +73,15 @@ def fingerprint(session: dict) -> str:
     tab order, placement and URL), so an unchanged fingerprint means there is
     nothing to send and control is not needed.
     """
-    tabs = [[tab.get(key) for key in TAB_FIELDS] + [current_url(tab), current_entry(tab).get("title")]
-            for tab in session.get("tabs", [])]
+    tabs = [
+        [tab.get(key) for key in TAB_FIELDS] + [
+            current_url(tab),
+            current_entry(tab).get("title")
+            if not cfg.MULTIPARTICIPANT or tab.get("pinned") or tab.get("zenEssential")
+            else None,
+        ]
+        for tab in session.get("tabs", [])
+    ]
     structure = {key: session.get(key, []) for key in ("spaces", "folders", "groups", "splitViewData")}
     encoded = json.dumps({"tabs": tabs, "structure": structure}, sort_keys=True,
                          separators=(",", ":")).encode()

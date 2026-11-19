@@ -60,6 +60,9 @@ const transportData = (projected, forDigest = false) => {
   // A loaded page keeps its own fetched favicon in the native applier.
   // Static user icons remain shared; ordinary cache differences do not.
   if (forDigest && projected.kind === "tab" && !data.hasStaticIcon) data.icon = null;
+  // Ordinary page titles change with live site activity, independently on each
+  // host. Keep their export hint, while static labels and pin identity stay shared.
+  if (forDigest && projected.kind === "tab" && data.pinned === false && !data.essential) data.title = null;
   return data;
 };
 const digests = () => {
