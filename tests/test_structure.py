@@ -30,6 +30,22 @@ def session():
 
 
 class FingerprintTests(unittest.TestCase):
+    def test_protocol_two_ignores_only_automatic_normal_page_title(self):
+        before = {'tabs': [{'zenSyncId': 't', 'pinned': False, 'entries': [{'url': 'https://page.invalid', 'title': 'First'}]}]}
+        after = copy.deepcopy(before)
+        after['tabs'][0]['entries'][0]['title'] = 'Notification'
+        with patch.object(c.cfg, 'MULTIPARTICIPANT', True):
+            self.assertEqual(s.fingerprint(before), s.fingerprint(after))
+            after['tabs'][0]['zenStaticLabel'] = 'Chosen label'
+            self.assertNotEqual(s.fingerprint(before), s.fingerprint(after))
+            for flag in ('pinned', 'zenEssential'):
+                left = copy.deepcopy(before); left['tabs'][0][flag] = True
+                right = copy.deepcopy(left); right['tabs'][0]['entries'][0]['title'] = 'Changed identity'
+                self.assertNotEqual(s.fingerprint(left), s.fingerprint(right))
+        after = copy.deepcopy(before); after['tabs'][0]['entries'][0]['title'] = 'Notification'
+        with patch.object(c.cfg, 'MULTIPARTICIPANT', False):
+            self.assertNotEqual(s.fingerprint(before), s.fingerprint(after))
+
     def changed(self, edit):
         before = session()
         after = copy.deepcopy(before)
@@ -321,6 +337,32 @@ class ProjectionFingerprint(unittest.TestCase):
 
 
 class TransportProjection(unittest.TestCase):
+    def test_dynamic_page_titles_are_cache_but_labels_pins_and_urls_are_shared(self):
+        import shutil, subprocess
+        if not shutil.which('node'):
+            self.skipTest('node unavailable')
+        prefix = """
+const data={url:'https://page.invalid',title:'First',pinned:false,essential:false,staticLabel:null};
+const records=new Map([['t',{kind:'tab',data}]]);
+const model={projections:()=>records,projectRecord:id=>records.get(id)};
+const ChromeUtils={importESModule:path=>path.includes('ZenSpacesSyncModel')?{ZenSpacesSyncModel:model,recordDigest:(kind,data)=>JSON.stringify([kind,data])}:path.includes('ZenSessionManager')?{ZenSessionStore:{}}:{SessionSaver:{}}};
+const Services={wm:{getMostRecentWindow:()=>({})}};
+"""
+        body = """
+data.pinned=false;data.essential=false;data.title='First';data.staticLabel=null;data.url='https://page.invalid';
+let before=digests().t[1];data.title='Background notification';const sameDynamic=before===digests().t[1];
+before=digests().t[1];data.staticLabel='Chosen label';const sharedLabel=before!==digests().t[1];
+data.pinned=true;before=digests().t[1];data.title='New pin identity';const sharedPin=before!==digests().t[1];
+data.pinned=false;data.essential=true;before=digests().t[1];data.title='New essential identity';const sharedEssential=before!==digests().t[1];
+data.essential=false;before=digests().t[1];data.url='https://changed.invalid';const sharedUrl=before!==digests().t[1];
+return {sameDynamic,sharedLabel,sharedPin,sharedEssential,sharedUrl};
+"""
+        code = prefix + 'const f=new Function(' + json.dumps(sr.PRELUDE + body) + ');console.log(JSON.stringify({legacy:f(false,()=>{}),multi:f(true,()=>{})}));'
+        result = json.loads(subprocess.run(['node', '-e', code], check=True, capture_output=True, text=True).stdout)
+        expected = dict(sameDynamic=True, sharedLabel=True, sharedPin=True, sharedEssential=True, sharedUrl=True)
+        self.assertEqual(result['multi'], expected)
+        self.assertEqual(result['legacy'], dict(expected, sameDynamic=False))
+
     def test_native_spaces_writer_is_refused_before_collection(self):
         import shutil, subprocess
         if not shutil.which('node'):
