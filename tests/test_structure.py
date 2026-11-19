@@ -321,6 +321,29 @@ class ProjectionFingerprint(unittest.TestCase):
 
 
 class TransportProjection(unittest.TestCase):
+    def test_native_spaces_writer_is_refused_before_collection(self):
+        import shutil, subprocess
+        if not shutil.which('node'):
+            self.skipTest('node unavailable')
+        prefix = """
+let enabled=true,writes=0;
+const ChromeUtils={importESModule:path=>path.includes("ZenSpacesSyncModel")?{ZenSpacesSyncModel:{invalidate:()=>{}}}:path.includes("ZenSessionManager")?{ZenSessionStore:{}}:{SessionSaver:{run:async()=>{writes++;}}}};
+const Services={prefs:{getBoolPref:()=>enabled},wm:{getMostRecentWindow:()=>({})}};
+"""
+        script = sr.PRELUDE + "return collect();"
+        body = """
+(async()=>{
+ let refused=false;try{await collectState(true,()=>{});}catch(e){refused=e.message.includes('native Spaces Sync');}
+ if(!refused||writes!==0)throw Error('native writer was not refused before collection');
+ enabled=false;await collectState(true,()=>{});
+ enabled=true;await collectState(false,()=>{});
+ if(writes!==2)throw Error('disabled native sync or legacy mode regressed');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        code = prefix + 'const collectState=new Function(' + json.dumps(script) + ');' + body
+        result = subprocess.run(['node', '-e', code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_protocol_two_normalizes_local_views_only(self):
         import shutil, subprocess
         if not shutil.which('node'):
