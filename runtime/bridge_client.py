@@ -147,7 +147,44 @@ def bridge_paths(directory: Path, prefix: Optional[str] = None) -> Paths:
 
 # --- browser identity ------------------------------------------------------
 
-def _linux_identity(executable_path: str) -> Optional[str]:
+_UNSET: Any = object()
+
+
+def configured_profile(settings: Optional[Dict[str, Any]] = None, prefix: Optional[str] = None) -> Optional[Path]:
+    settings = load_settings() if settings is None else settings
+    value = settings.get(prefix or platform_prefix(), {}).get("profile")
+    return Path(value).expanduser() if isinstance(value, str) and value else None
+
+
+def runs_other_profile(arguments: List[str], configured: Optional[Path]) -> bool:
+    """Whether a browser command line explicitly names a profile other than ours.
+
+    A second Twilight (a disposable test profile, another channel) shares the
+    executable; taking it for ours hid the real bridge. A browser started
+    without --profile (the macOS Dock) is still ours.
+    """
+    if configured is None:
+        return False
+    named = None
+    for index, argument in enumerate(arguments):
+        if argument in ("--profile", "-profile") and index + 1 < len(arguments):
+            named = arguments[index + 1]
+        elif argument.startswith("--profile="):
+            named = argument.split("=", 1)[1]
+    if named is None:
+        return False
+    return Path(named).expanduser().resolve() != configured.expanduser().resolve()
+
+
+def mac_command_runs_profile(command: str, profile: Path) -> bool:
+    """ps joins arguments with spaces and profile paths contain spaces: compare text."""
+    if " --profile " not in command and " -profile " not in command:
+        return True  # opened from the Dock: the default profile, ours
+    expected = str(profile.expanduser())
+    return f"--profile {expected}" in command or f"-profile {expected}" in command
+
+
+def _linux_identity(executable_path: str, profile: Optional[Path] = None) -> Optional[str]:
     # A quick restart briefly leaves the exiting browser alive; prefer the newest.
     newest = None
     try:
@@ -161,6 +198,8 @@ def _linux_identity(executable_path: str) -> Optional[str]:
             command = (proc / "cmdline").read_bytes().split(b"\0")
             if not command or command[0].decode() != executable_path or b"-contentproc" in command:
                 continue
+            if runs_other_profile([part.decode() for part in command if part], profile):
+                continue
             started = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
         except (OSError, UnicodeDecodeError, IndexError, ValueError):
             continue
@@ -169,7 +208,7 @@ def _linux_identity(executable_path: str) -> Optional[str]:
     return f"{newest[1]}:{newest[0]}" if newest else None
 
 
-def _mac_identity(executable_path: str) -> Optional[str]:
+def _mac_identity(executable_path: str, profile: Optional[Path] = None) -> Optional[str]:
     try:
         listing = subprocess.run(["/bin/ps", "-axo", "pid=,command="], capture_output=True,
                                  text=True, timeout=5, check=False).stdout
@@ -178,6 +217,8 @@ def _mac_identity(executable_path: str) -> Optional[str]:
     for line in listing.splitlines():
         fields = line.strip().split(maxsplit=1)
         if len(fields) == 2 and fields[1].split(maxsplit=1)[0] == executable_path:
+            if profile is not None and not mac_command_runs_profile(fields[1], profile):
+                continue
             try:
                 started = subprocess.run(["/bin/ps", "-p", fields[0], "-o", "lstart="],
                                          capture_output=True, text=True, timeout=5, check=False)
@@ -189,13 +230,19 @@ def _mac_identity(executable_path: str) -> Optional[str]:
     return None
 
 
-def browser_identity(executable_path: str, system: Optional[str] = None) -> Optional[str]:
-    """``pid:start`` of the running browser, in the format the bridge records."""
+def browser_identity(executable_path: str, system: Optional[str] = None, profile: Any = _UNSET) -> Optional[str]:
+    """``pid:start`` of the running browser, in the format the bridge records.
+
+    A process of the same executable that names another --profile is not ours;
+    ``profile`` defaults to the one in config.toml (None: any profile)."""
     if not executable_path:
         return None
-    if (system or platform.system()) == "Darwin":
-        return _mac_identity(executable_path)
-    return _linux_identity(executable_path)
+    system = system or platform.system()
+    if profile is _UNSET:
+        profile = configured_profile(prefix=platform_prefix(system))
+    if system == "Darwin":
+        return _mac_identity(executable_path, profile)
+    return _linux_identity(executable_path, profile)
 
 
 def identity_is_current(identity: str, executable_path: str, system: Optional[str] = None) -> bool:
